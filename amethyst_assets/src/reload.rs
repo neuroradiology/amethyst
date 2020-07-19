@@ -2,13 +2,18 @@
 
 use std::{sync::Arc, time::Instant};
 
-use amethyst_core as core;
-use amethyst_core::{
-    specs::prelude::{DispatcherBuilder, Read, Resources, System, Write},
-    SystemBundle, Time,
-};
+use derive_new::new;
 
-use {Asset, Format, FormatValue, Loader, Result, Source};
+use amethyst_core::{
+    ecs::prelude::{DispatcherBuilder, Read, System, SystemData, World, Write},
+    SystemBundle, SystemDesc, Time,
+};
+use amethyst_error::Error;
+
+#[cfg(feature = "profiler")]
+use thread_profiler::profile_scope;
+
+use crate::{Format, FormatValue, Loader, Source};
 
 /// This bundle activates hot reload for the `Loader`,
 /// adds a `HotReloadStrategy` and the `HotReloadSystem`.
@@ -25,8 +30,16 @@ impl HotReloadBundle {
 }
 
 impl<'a, 'b> SystemBundle<'a, 'b> for HotReloadBundle {
-    fn build(self, dispatcher: &mut DispatcherBuilder<'a, 'b>) -> core::Result<()> {
-        dispatcher.add(HotReloadSystem::new(self.strategy), "hot_reload", &[]);
+    fn build(
+        self,
+        world: &mut World,
+        dispatcher: &mut DispatcherBuilder<'a, 'b>,
+    ) -> Result<(), Error> {
+        dispatcher.add(
+            HotReloadSystemDesc::new(self.strategy).build(world),
+            "hot_reload",
+            &[],
+        );
         Ok(())
     }
 }
@@ -36,19 +49,14 @@ impl<'a, 'b> SystemBundle<'a, 'b> for HotReloadBundle {
 /// ## Examples
 ///
 /// ```
-/// # extern crate amethyst_assets;
-/// # extern crate amethyst_core;
-/// #
 /// # use amethyst_assets::HotReloadStrategy;
-/// # use amethyst_core::specs::prelude::World;
+/// # use amethyst_core::ecs::{World, WorldExt};
 /// #
-/// # fn main() {
 /// let mut world = World::new();
 /// // Assets will be reloaded every two seconds (in case they changed)
-/// world.add_resource(HotReloadStrategy::every(2));
-/// # }
+/// world.insert(HotReloadStrategy::every(2));
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct HotReloadStrategy {
     inner: HotReloadStrategyInner,
 }
@@ -115,7 +123,7 @@ impl Default for HotReloadStrategy {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum HotReloadStrategyInner {
     Every {
         interval: u8,
@@ -129,24 +137,35 @@ enum HotReloadStrategyInner {
     Never,
 }
 
-/// System for updating `HotReloadStrategy`.
-pub struct HotReloadSystem {
-    initial_strategy: HotReloadStrategy,
+/// Builds a `HotReloadSystem`.
+#[derive(Debug, new)]
+pub struct HotReloadSystemDesc {
+    /// The `HotReloadStrategy`.
+    pub strategy: HotReloadStrategy,
 }
 
-impl HotReloadSystem {
-    /// Create a new reload system
-    pub fn new(strategy: HotReloadStrategy) -> Self {
-        HotReloadSystem {
-            initial_strategy: strategy,
-        }
+impl<'a, 'b> SystemDesc<'a, 'b, HotReloadSystem> for HotReloadSystemDesc {
+    fn build(self, world: &mut World) -> HotReloadSystem {
+        <HotReloadSystem as System<'_>>::SystemData::setup(world);
+
+        world.insert(self.strategy);
+        world.fetch_mut::<Loader>().set_hot_reload(true);
+
+        HotReloadSystem::new()
     }
 }
+
+/// System for updating `HotReloadStrategy`.
+#[derive(Debug, new)]
+pub struct HotReloadSystem;
 
 impl<'a> System<'a> for HotReloadSystem {
     type SystemData = (Read<'a, Time>, Write<'a, HotReloadStrategy>);
 
     fn run(&mut self, (time, mut strategy): Self::SystemData) {
+        #[cfg(feature = "profiler")]
+        profile_scope!("hot_reload_system");
+
         match strategy.inner {
             HotReloadStrategyInner::Trigger {
                 ref mut triggered,
@@ -170,17 +189,10 @@ impl<'a> System<'a> for HotReloadSystem {
             HotReloadStrategyInner::Never => {}
         }
     }
-
-    fn setup(&mut self, res: &mut Resources) {
-        use amethyst_core::specs::prelude::SystemData;
-        Self::SystemData::setup(res);
-        res.insert(self.initial_strategy.clone());
-        res.fetch_mut::<Loader>().set_hot_reload(true);
-    }
 }
 
 /// The `Reload` trait provides a method which checks if an asset needs to be reloaded.
-pub trait Reload<A: Asset>: ReloadClone<A> + Send + Sync + 'static {
+pub trait Reload<D>: ReloadClone<D> + Send + Sync + 'static {
     /// Checks if a reload is necessary.
     fn needs_reload(&self) -> bool;
     /// Returns the asset name.
@@ -188,24 +200,23 @@ pub trait Reload<A: Asset>: ReloadClone<A> + Send + Sync + 'static {
     /// Returns the format name.
     fn format(&self) -> &'static str;
     /// Reloads the asset.
-    fn reload(self: Box<Self>) -> Result<FormatValue<A>>;
+    fn reload(self: Box<Self>) -> Result<FormatValue<D>, Error>;
 }
 
-pub trait ReloadClone<A> {
-    fn cloned(&self) -> Box<Reload<A>>;
+pub trait ReloadClone<D> {
+    fn cloned(&self) -> Box<dyn Reload<D>>;
 }
 
-impl<A, T> ReloadClone<A> for T
+impl<D: 'static, T> ReloadClone<D> for T
 where
-    A: Asset,
-    T: Clone + Reload<A>,
+    T: Clone + Reload<D>,
 {
-    fn cloned(&self) -> Box<Reload<A>> {
+    fn cloned(&self) -> Box<dyn Reload<D>> {
         Box::new(self.clone())
     }
 }
 
-impl<A: Asset> Clone for Box<Reload<A>> {
+impl<D: 'static> Clone for Box<dyn Reload<D>> {
     fn clone(&self) -> Self {
         self.cloned()
     }
@@ -213,56 +224,42 @@ impl<A: Asset> Clone for Box<Reload<A>> {
 
 /// An implementation of `Reload` which just stores the modification time
 /// and the path of the file.
-pub struct SingleFile<A: Asset, F: Format<A>> {
-    format: F,
+pub struct SingleFile<D> {
+    format: Box<dyn Format<D>>,
     modified: u64,
-    options: F::Options,
     path: String,
-    source: Arc<Source>,
+    source: Arc<dyn Source>,
 }
 
-impl<A: Asset, F: Format<A>> SingleFile<A, F> {
+impl<D: 'static> SingleFile<D> {
     /// Creates a new `SingleFile` reload object.
     pub fn new(
-        format: F,
+        format: Box<dyn Format<D>>,
         modified: u64,
-        options: F::Options,
         path: String,
-        source: Arc<Source>,
+        source: Arc<dyn Source>,
     ) -> Self {
         SingleFile {
             format,
             modified,
-            options,
             path,
             source,
         }
     }
 }
 
-impl<A, F> Clone for SingleFile<A, F>
-where
-    A: Asset,
-    F: Clone + Format<A>,
-    F::Options: Clone,
-{
+impl<D: 'static> Clone for SingleFile<D> {
     fn clone(&self) -> Self {
         SingleFile {
             format: self.format.clone(),
             modified: self.modified,
-            options: self.options.clone(),
             path: self.path.clone(),
             source: self.source.clone(),
         }
     }
 }
 
-impl<A, F> Reload<A> for SingleFile<A, F>
-where
-    A: Asset,
-    F: Clone + Format<A> + Sync,
-    <F as Format<A>>::Options: Clone + Sync,
-{
+impl<D: 'static> Reload<D> for SingleFile<D> {
     fn needs_reload(&self) -> bool {
         self.modified != 0 && (self.source.modified(&self.path).unwrap_or(0) > self.modified)
     }
@@ -272,22 +269,21 @@ where
     }
 
     fn format(&self) -> &'static str {
-        F::NAME
+        self.format.name()
     }
 
-    fn reload(self: Box<Self>) -> Result<FormatValue<A>> {
+    fn reload(self: Box<Self>) -> Result<FormatValue<D>, Error> {
         #[cfg(feature = "profiler")]
         profile_scope!("reload_single_file");
 
-        let this: SingleFile<_, _> = *self;
+        let this: SingleFile<D> = *self;
         let SingleFile {
             format,
             path,
             source,
-            options,
             ..
         } = this;
 
-        format.import(path, source, options, true)
+        format.import(path, source, Some(objekt::clone(&format)))
     }
 }

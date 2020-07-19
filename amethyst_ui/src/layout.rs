@@ -1,13 +1,17 @@
-use gfx_glyph::{HorizontalAlign, VerticalAlign};
+use glyph_brush::{HorizontalAlign, VerticalAlign};
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "profiler")]
+use thread_profiler::profile_scope;
 
 use amethyst_core::{
-    specs::prelude::{
-        BitSet, InsertedFlag, Join, ModifiedFlag, ReadExpect, ReadStorage, ReaderId, Resources,
-        System, WriteStorage,
+    ecs::prelude::{
+        BitSet, ComponentEvent, Join, ReadExpect, ReadStorage, ReaderId, System, SystemData, World,
+        WriteStorage,
     },
-    HierarchyEvent, Parent, ParentHierarchy,
+    HierarchyEvent, Parent, ParentHierarchy, SystemDesc,
 };
-use amethyst_renderer::ScreenDimensions;
+use amethyst_window::ScreenDimensions;
 
 use super::UiTransform;
 
@@ -23,7 +27,7 @@ pub enum ScaleMode {
 
 /// Indicated where the anchor is, relative to the parent (or to the screen, if there is no parent).
 /// Follow a normal english Y,X naming.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 pub enum Anchor {
     /// Anchors the entity at the top left of the parent.
     TopLeft,
@@ -49,7 +53,7 @@ impl Anchor {
     /// Returns the normalized offset using the `Anchor` setting.
     /// The normalized offset is a [-0.5,0.5] value
     /// indicating the relative offset multiplier from the parent's position (centered).
-    pub fn norm_offset(&self) -> (f32, f32) {
+    pub fn norm_offset(self) -> (f32, f32) {
         match self {
             Anchor::TopLeft => (-0.5, 0.5),
             Anchor::TopMiddle => (0.0, 0.5),
@@ -63,8 +67,8 @@ impl Anchor {
         }
     }
 
-    /// Vertical align. Used by the ui `Pass`.
-    pub(crate) fn vertical_align(&self) -> VerticalAlign {
+    /// Vertical align. Used by the `UiGlyphsSystem`.
+    pub(crate) fn vertical_align(self) -> VerticalAlign {
         match self {
             Anchor::TopLeft => VerticalAlign::Top,
             Anchor::TopMiddle => VerticalAlign::Top,
@@ -78,8 +82,8 @@ impl Anchor {
         }
     }
 
-    /// Horizontal align. Used by the ui `Pass`.
-    pub(crate) fn horizontal_align(&self) -> HorizontalAlign {
+    /// Horizontal align. Used by the `UiGlyphsSystem`.
+    pub(crate) fn horizontal_align(self) -> HorizontalAlign {
         match self {
             Anchor::TopLeft => HorizontalAlign::Left,
             Anchor::TopMiddle => HorizontalAlign::Center,
@@ -115,22 +119,51 @@ pub enum Stretch {
         x_margin: f32,
         /// The margin length for the height
         y_margin: f32,
+        /// Keep the aspect ratio by adding more margin to one axis when necessary
+        keep_aspect_ratio: bool,
     },
+}
+
+/// Builds a `UiTransformSystem`.
+#[derive(Default, Debug)]
+pub struct UiTransformSystemDesc;
+
+impl<'a, 'b> SystemDesc<'a, 'b, UiTransformSystem> for UiTransformSystemDesc {
+    fn build(self, world: &mut World) -> UiTransformSystem {
+        <UiTransformSystem as System<'_>>::SystemData::setup(world);
+
+        let parent_events_id = world.fetch_mut::<ParentHierarchy>().track();
+        let mut transforms = WriteStorage::<UiTransform>::fetch(&world);
+        let transform_events_id = transforms.register_reader();
+
+        UiTransformSystem::new(transform_events_id, parent_events_id)
+    }
 }
 
 /// Manages the `Parent` component on entities having `UiTransform`
 /// It does almost the same as the `TransformSystem`, but with some differences,
 /// like `UiTransform` alignment and stretching.
-#[derive(Default)]
+#[derive(Debug)]
 pub struct UiTransformSystem {
     transform_modified: BitSet,
-
-    inserted_transform_id: Option<ReaderId<InsertedFlag>>,
-    modified_transform_id: Option<ReaderId<ModifiedFlag>>,
-
-    parent_events_id: Option<ReaderId<HierarchyEvent>>,
-
+    transform_events_id: ReaderId<ComponentEvent>,
+    parent_events_id: ReaderId<HierarchyEvent>,
     screen_size: (f32, f32),
+}
+
+impl UiTransformSystem {
+    /// Creates a new `UiTransformSystem`.
+    pub fn new(
+        transform_events_id: ReaderId<ComponentEvent>,
+        parent_events_id: ReaderId<HierarchyEvent>,
+    ) -> Self {
+        Self {
+            transform_modified: BitSet::default(),
+            transform_events_id,
+            parent_events_id,
+            screen_size: (0.0, 0.0),
+        }
+    }
 }
 
 impl<'a> System<'a> for UiTransformSystem {
@@ -141,27 +174,30 @@ impl<'a> System<'a> for UiTransformSystem {
         ReadExpect<'a, ParentHierarchy>,
     );
     fn run(&mut self, data: Self::SystemData) {
-        let (mut transforms, parents, screen_dim, hierarchy) = data;
         #[cfg(feature = "profiler")]
-        profile_scope!("ui_parent_system");
+        profile_scope!("ui_transform_system");
+
+        let (mut transforms, parents, screen_dim, hierarchy) = data;
 
         self.transform_modified.clear();
 
-        transforms.populate_inserted(
-            &mut self.inserted_transform_id.as_mut().unwrap(),
-            &mut self.transform_modified,
-        );
-        transforms.populate_modified(
-            &mut self.modified_transform_id.as_mut().unwrap(),
-            &mut self.transform_modified,
-        );
+        let self_transform_modified = &mut self.transform_modified;
 
-        for event in hierarchy
-            .changed()
-            .read(&mut self.parent_events_id.as_mut().unwrap())
-        {
+        let self_transform_events_id = &mut self.transform_events_id;
+
+        transforms
+            .channel()
+            .read(self_transform_events_id)
+            .for_each(|event| match event {
+                ComponentEvent::Inserted(id) | ComponentEvent::Modified(id) => {
+                    self_transform_modified.add(*id);
+                }
+                ComponentEvent::Removed(_id) => {}
+            });
+
+        for event in hierarchy.changed().read(&mut self.parent_events_id) {
             if let HierarchyEvent::Modified(entity) = *event {
-                self.transform_modified.add(entity.id());
+                self_transform_modified.add(entity.id());
             }
         }
 
@@ -174,8 +210,10 @@ impl<'a> System<'a> for UiTransformSystem {
                 &*screen_dim,
             );
         } else {
+            // Immutable borrow
+            let self_transform_modified = &*self_transform_modified;
             process_root_iter(
-                (&mut transforms, !&parents, &self.transform_modified)
+                (&mut transforms, !&parents, self_transform_modified)
                     .join()
                     .map(|i| i.0),
                 &*screen_dim,
@@ -183,25 +221,34 @@ impl<'a> System<'a> for UiTransformSystem {
         }
 
         // Populate the modifications we just did.
-        transforms.populate_modified(
-            &mut self.modified_transform_id.as_mut().unwrap(),
-            &mut self.transform_modified,
-        );
+        transforms
+            .channel()
+            .read(self_transform_events_id)
+            .for_each(|event| {
+                if let ComponentEvent::Modified(id) = event {
+                    self_transform_modified.add(*id);
+                }
+            });
 
         // Compute transforms with parents.
         for entity in hierarchy.all() {
             {
-                let self_dirty = self.transform_modified.contains(entity.id());
-                let parent_entity = parents.get(*entity).unwrap().entity;
-                let parent_dirty = self.transform_modified.contains(parent_entity.id());
+                let self_dirty = self_transform_modified.contains(entity.id());
+                let parent_entity = match parents.get(*entity) {
+                    Some(p) => p.entity,
+                    None => continue, // Skip this entity iteration, as its dirty
+                };
+                let parent_dirty = self_transform_modified.contains(parent_entity.id());
                 if parent_dirty || self_dirty || screen_resized {
                     let parent_transform_copy = transforms.get(parent_entity).cloned();
                     let transform = transforms.get_mut(*entity);
-                    if parent_transform_copy.is_none() || transform.is_none() {
-                        continue;
-                    }
-                    let parent_transform_copy = parent_transform_copy.unwrap();
-                    let mut transform = transform.unwrap();
+
+                    let (transform, parent_transform_copy) =
+                        match (transform, parent_transform_copy) {
+                            (Some(v1), Some(v2)) => (v1, v2),
+                            _ => continue,
+                        };
+
                     let norm = transform.anchor.norm_offset();
                     transform.pixel_x =
                         parent_transform_copy.pixel_x + parent_transform_copy.pixel_width * norm.0;
@@ -219,10 +266,28 @@ impl<'a> System<'a> for UiTransformSystem {
                             transform.width,
                             parent_transform_copy.pixel_height - y_margin * 2.0,
                         ),
-                        Stretch::XY { x_margin, y_margin } => (
+                        Stretch::XY {
+                            keep_aspect_ratio: false,
+                            x_margin,
+                            y_margin,
+                        } => (
                             parent_transform_copy.pixel_width - x_margin * 2.0,
                             parent_transform_copy.pixel_height - y_margin * 2.0,
                         ),
+                        Stretch::XY {
+                            keep_aspect_ratio: true,
+                            x_margin,
+                            y_margin,
+                        } => {
+                            let scale = f32::min(
+                                (parent_transform_copy.pixel_width - x_margin * 2.0)
+                                    / transform.width,
+                                (parent_transform_copy.pixel_height - y_margin * 2.0)
+                                    / transform.height,
+                            );
+
+                            (transform.width * scale, transform.height * scale)
+                        }
                     };
                     transform.width = new_size.0;
                     transform.height = new_size.1;
@@ -244,33 +309,32 @@ impl<'a> System<'a> for UiTransformSystem {
                                 transform.height * parent_transform_copy.pixel_height;
                         }
                     }
+                    let pivot_norm = transform.pivot.norm_offset();
+                    transform.pixel_x += transform.pixel_width * -pivot_norm.0;
+                    transform.pixel_y += transform.pixel_height * -pivot_norm.1;
                 }
             }
             // Populate the modifications we just did.
-            transforms.populate_modified(
-                &mut self.modified_transform_id.as_mut().unwrap(),
-                &mut self.transform_modified,
-            );
+            transforms
+                .channel()
+                .read(self_transform_events_id)
+                .for_each(|event| {
+                    if let ComponentEvent::Modified(id) = event {
+                        self_transform_modified.add(*id);
+                    }
+                });
         }
         // We need to treat any changes done inside the system as non-modifications, so we read out
         // any events that were generated during the system run
-        transforms.populate_inserted(
-            &mut self.inserted_transform_id.as_mut().unwrap(),
-            &mut self.transform_modified,
-        );
-        transforms.populate_modified(
-            &mut self.modified_transform_id.as_mut().unwrap(),
-            &mut self.transform_modified,
-        );
-    }
-
-    fn setup(&mut self, res: &mut Resources) {
-        use amethyst_core::specs::prelude::SystemData;
-        Self::SystemData::setup(res);
-        self.parent_events_id = Some(res.fetch_mut::<ParentHierarchy>().track());
-        let mut transforms = WriteStorage::<UiTransform>::fetch(res);
-        self.inserted_transform_id = Some(transforms.track_inserted());
-        self.modified_transform_id = Some(transforms.track_modified());
+        transforms
+            .channel()
+            .read(self_transform_events_id)
+            .for_each(|event| match event {
+                ComponentEvent::Inserted(id) | ComponentEvent::Modified(id) => {
+                    self_transform_modified.add(*id);
+                }
+                ComponentEvent::Removed(_id) => {}
+            });
     }
 }
 
@@ -288,10 +352,26 @@ where
             Stretch::NoStretch => (transform.width, transform.height),
             Stretch::X { x_margin } => (screen_dim.width() - x_margin * 2.0, transform.height),
             Stretch::Y { y_margin } => (transform.width, screen_dim.height() - y_margin * 2.0),
-            Stretch::XY { x_margin, y_margin } => (
+            Stretch::XY {
+                keep_aspect_ratio: false,
+                x_margin,
+                y_margin,
+            } => (
                 screen_dim.width() - x_margin * 2.0,
                 screen_dim.height() - y_margin * 2.0,
             ),
+            Stretch::XY {
+                keep_aspect_ratio: true,
+                x_margin,
+                y_margin,
+            } => {
+                let scale = f32::min(
+                    (screen_dim.width() - x_margin * 2.0) / transform.width,
+                    (screen_dim.height() - y_margin * 2.0) / transform.height,
+                );
+
+                (transform.width * scale, transform.height * scale)
+            }
         };
         transform.width = new_size.0;
         transform.height = new_size.1;
@@ -309,5 +389,8 @@ where
                 transform.pixel_height = transform.height * screen_dim.height();
             }
         }
+        let pivot_norm = transform.pivot.norm_offset();
+        transform.pixel_x += transform.pixel_width * -pivot_norm.0;
+        transform.pixel_y += transform.pixel_height * -pivot_norm.1;
     }
 }

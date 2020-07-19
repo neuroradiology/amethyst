@@ -1,22 +1,23 @@
-use std::{hash::Hash, marker};
-
-use resources::AnimationSampling;
-use skinning::VertexSkinningSystem;
-
+use crate::{
+    resources::AnimationSampling,
+    skinning::VertexSkinningSystemDesc,
+    systems::{
+        AnimationControlSystemDesc, AnimationProcessor, SamplerInterpolationSystem,
+        SamplerProcessor,
+    },
+};
 use amethyst_core::{
-    specs::prelude::{Component, DispatcherBuilder},
-    Result, SystemBundle,
+    ecs::prelude::{Component, DispatcherBuilder, World},
+    SystemBundle, SystemDesc,
 };
-
-use systems::{
-    AnimationControlSystem, AnimationProcessor, SamplerInterpolationSystem, SamplerProcessor,
-};
+use amethyst_error::Error;
+use std::{hash::Hash, marker};
 
 /// Bundle for vertex skinning
 ///
 /// This registers `VertexSkinningSystem`.
 /// Note that the user must make sure this system runs after `TransformSystem`
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct VertexSkinningBundle<'a> {
     dep: &'a [&'a str],
 }
@@ -35,9 +36,13 @@ impl<'a> VertexSkinningBundle<'a> {
 }
 
 impl<'a, 'b, 'c> SystemBundle<'a, 'b> for VertexSkinningBundle<'c> {
-    fn build(self, builder: &mut DispatcherBuilder<'a, 'b>) -> Result<()> {
+    fn build(
+        self,
+        world: &mut World,
+        builder: &mut DispatcherBuilder<'a, 'b>,
+    ) -> Result<(), Error> {
         builder.add(
-            VertexSkinningSystem::new(),
+            VertexSkinningSystemDesc::default().build(world),
             "vertex_skinning_system",
             self.dep,
         );
@@ -53,7 +58,7 @@ impl<'a, 'b, 'c> SystemBundle<'a, 'b> for VertexSkinningBundle<'c> {
 /// ### Type parameters:
 ///
 /// - `T`: the component type that sampling should be applied to
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct SamplingBundle<'a, T> {
     name: &'a str,
     dep: &'a [&'a str],
@@ -85,7 +90,11 @@ impl<'a, 'b, 'c, T> SystemBundle<'a, 'b> for SamplingBundle<'c, T>
 where
     T: AnimationSampling + Component,
 {
-    fn build(self, builder: &mut DispatcherBuilder<'a, 'b>) -> Result<()> {
+    fn build(
+        self,
+        _world: &mut World,
+        builder: &mut DispatcherBuilder<'a, 'b>,
+    ) -> Result<(), Error> {
         builder.add(SamplerProcessor::<T::Primitive>::new(), "", &[]);
         builder.add(SamplerInterpolationSystem::<T>::new(), self.name, self.dep);
         Ok(())
@@ -104,7 +113,7 @@ where
 /// - `I`: identifier type for running animations, only one animation can be run at the same time
 ///        with the same id (per entity)
 /// - `T`: the component type that sampling should be applied to
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct AnimationBundle<'a, I, T> {
     animation_name: &'a str,
     sampling_name: &'a str,
@@ -140,15 +149,19 @@ where
     I: PartialEq + Eq + Hash + Copy + Send + Sync + 'static,
     T: AnimationSampling + Component + Clone,
 {
-    fn build(self, builder: &mut DispatcherBuilder<'a, 'b>) -> Result<()> {
+    fn build(
+        self,
+        world: &mut World,
+        builder: &mut DispatcherBuilder<'a, 'b>,
+    ) -> Result<(), Error> {
         builder.add(AnimationProcessor::<T>::new(), "", &[]);
         builder.add(
-            AnimationControlSystem::<I, T>::new(),
+            AnimationControlSystemDesc::<I, T>::default().build(world),
             self.animation_name,
             self.dep,
         );
         SamplingBundle::<T>::new(self.sampling_name)
             .with_dep(&[self.animation_name])
-            .build(builder)
+            .build(world, builder)
     }
 }

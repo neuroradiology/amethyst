@@ -1,28 +1,26 @@
 //! ECS input bundle
 
-use std::{hash::Hash, path::Path, result::Result as StdResult};
-
-#[cfg(feature = "sdl_controller")]
-use sdl_events_system::ControllerMappings;
-use serde::{de::DeserializeOwned, Serialize};
-
+use crate::{BindingError, BindingTypes, Bindings, InputSystemDesc};
 use amethyst_config::{Config, ConfigError};
 use amethyst_core::{
-    bundle::{Result, SystemBundle},
-    specs::prelude::DispatcherBuilder,
+    ecs::prelude::{DispatcherBuilder, World},
+    SystemBundle, SystemDesc,
 };
+use amethyst_error::Error;
+use derivative::Derivative;
+use std::{error, fmt, path::Path};
 
-use {Bindings, InputSystem};
+#[cfg(feature = "sdl_controller")]
+use crate::sdl_events_system::ControllerMappings;
 
 /// Bundle for adding the `InputHandler`.
 ///
-/// This also adds the Winit EventHandler and the InputEvent<AC> EventHandler
-/// where AC is the type for Actions you have assigned here.
+/// This also adds the Winit EventHandler and the `InputEvent<T>` EventHandler
+/// where `T::Action` is the type for Actions you have assigned here.
 ///
 /// ## Type parameters
 ///
-/// AX: The type used to identify input axes.
-/// AC: The type used to identify input actions.
+/// T: The type used to identify input binding types.
 ///
 /// String is appropriate for either of these if you don't know what to use.
 ///
@@ -30,41 +28,37 @@ use {Bindings, InputSystem};
 ///
 /// No errors returned from this bundle.
 ///
-#[derive(Derivative)]
+#[derive(Debug, Derivative)]
 #[derivative(Default(bound = ""))]
-pub struct InputBundle<AX, AC>
-where
-    AX: Hash + Eq,
-    AC: Hash + Eq,
-{
-    bindings: Option<Bindings<AX, AC>>,
+pub struct InputBundle<T: BindingTypes> {
+    bindings: Option<Bindings<T>>,
     #[cfg(feature = "sdl_controller")]
     controller_mappings: Option<ControllerMappings>,
 }
 
-impl<AX, AC> InputBundle<AX, AC>
-where
-    AX: Hash + Eq,
-    AC: Hash + Eq,
-{
+impl<T: BindingTypes> InputBundle<T> {
     /// Create a new input bundle with no bindings
     pub fn new() -> Self {
         Default::default()
     }
 
     /// Use the provided bindings with the `InputHandler`
-    pub fn with_bindings(mut self, bindings: Bindings<AX, AC>) -> Self {
+    pub fn with_bindings(mut self, bindings: Bindings<T>) -> Self {
         self.bindings = Some(bindings);
         self
     }
 
     /// Load bindings from file
-    pub fn with_bindings_from_file<P: AsRef<Path>>(self, file: P) -> StdResult<Self, ConfigError>
+    pub fn with_bindings_from_file<P: AsRef<Path>>(
+        self,
+        file: P,
+    ) -> Result<Self, BindingsFileError<T>>
     where
-        AX: DeserializeOwned + Serialize,
-        AC: DeserializeOwned + Serialize,
+        Bindings<T>: Config,
     {
-        Ok(self.with_bindings(Bindings::load_no_fallback(file)?))
+        let mut bindings = Bindings::load(file)?;
+        bindings.check_invariants()?;
+        Ok(self.with_bindings(bindings))
     }
 
     /// Load SDL controller mappings from file
@@ -76,11 +70,7 @@ where
 
     /// Load SDL controller mappings from file
     #[cfg(feature = "sdl_controller")]
-    pub fn with_sdl_controller_mappings_from_file<P: AsRef<Path>>(mut self, file: P) -> Self
-    where
-        AX: DeserializeOwned + Serialize,
-        AC: DeserializeOwned + Serialize,
-    {
+    pub fn with_sdl_controller_mappings_from_file<P: AsRef<Path>>(mut self, file: P) -> Self {
         use std::path::PathBuf;
 
         let path_buf = PathBuf::from(file.as_ref());
@@ -89,25 +79,73 @@ where
     }
 }
 
-impl<'a, 'b, AX, AC> SystemBundle<'a, 'b> for InputBundle<AX, AC>
-where
-    AX: Hash + Eq + Clone + Send + Sync + 'static,
-    AC: Hash + Eq + Clone + Send + Sync + 'static,
-{
-    fn build(self, builder: &mut DispatcherBuilder<'a, 'b>) -> Result<()> {
+impl<'a, 'b, T: BindingTypes> SystemBundle<'a, 'b> for InputBundle<T> {
+    fn build(
+        self,
+        world: &mut World,
+        builder: &mut DispatcherBuilder<'a, 'b>,
+    ) -> Result<(), Error> {
         #[cfg(feature = "sdl_controller")]
         {
             use super::SdlEventsSystem;
             builder.add_thread_local(
                 // TODO: improve errors when migrating to failure
-                SdlEventsSystem::<AX, AC>::new(self.controller_mappings).unwrap(),
+                SdlEventsSystem::<T>::new(world, self.controller_mappings).unwrap(),
             );
         }
         builder.add(
-            InputSystem::<AX, AC>::new(self.bindings),
+            InputSystemDesc::<T>::new(self.bindings).build(world),
             "input_system",
             &[],
         );
         Ok(())
+    }
+}
+
+/// An error occurred while loading the bindings file.
+#[derive(Derivative)]
+#[derivative(Debug(bound = ""))]
+pub enum BindingsFileError<T: BindingTypes> {
+    /// Problem in amethyst_config
+    ConfigError(ConfigError),
+    /// Problem with the bindings themselves.
+    BindingError(BindingError<T>),
+}
+
+impl<T: BindingTypes> fmt::Display for BindingsFileError<T>
+where
+    T::Axis: fmt::Display,
+    T::Action: fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BindingsFileError::ConfigError(..) => write!(f, "Configuration error"),
+            BindingsFileError::BindingError(..) => write!(f, "Binding error"),
+        }
+    }
+}
+
+impl<T: BindingTypes> error::Error for BindingsFileError<T>
+where
+    T::Axis: fmt::Display,
+    T::Action: fmt::Display,
+{
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            BindingsFileError::ConfigError(ref e) => Some(e),
+            BindingsFileError::BindingError(ref e) => Some(e),
+        }
+    }
+}
+
+impl<T: BindingTypes> From<BindingError<T>> for BindingsFileError<T> {
+    fn from(error: BindingError<T>) -> Self {
+        BindingsFileError::BindingError(error)
+    }
+}
+
+impl<T: BindingTypes> From<ConfigError> for BindingsFileError<T> {
+    fn from(error: ConfigError) -> Self {
+        BindingsFileError::ConfigError(error)
     }
 }

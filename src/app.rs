@@ -1,29 +1,31 @@
 //! The core engine framework.
 
-use std::{error::Error as StdError, marker::PhantomData, path::Path, sync::Arc, time::Duration};
+use std::{env, marker::PhantomData, path::Path, sync::Arc, time::Duration};
 
-use log::Level;
+use crate::shred::Resource;
+use derivative::Derivative;
+use log::{debug, info, log_enabled, trace, Level};
 use rayon::ThreadPoolBuilder;
-use shred::Resource;
-#[cfg(feature = "profiler")]
-use thread_profiler::{register_thread_with_profiler, write_profile};
+#[cfg(feature = "sentry")]
+use sentry::integrations::panic::register_panic_handler;
 use winit::Event;
 
-use {
+#[cfg(feature = "profiler")]
+use thread_profiler::{profile_scope, register_thread_with_profiler, write_profile};
+
+use crate::{
     assets::{Loader, Source},
+    callback_queue::CallbackQueue,
     core::{
         frame_limiter::{FrameLimiter, FrameRateLimitConfig, FrameRateLimitStrategy},
         shrev::{EventChannel, ReaderId},
         timing::{Stopwatch, Time},
-        EventReader, Named,
+        ArcThreadPool, EventReader, Named,
     },
-    ecs::{
-        common::Errors,
-        prelude::{Component, Read, World, Write},
-    },
-    error::{Error, Result},
-    game_data::DataInit,
-    state::{State, StateData, StateMachine},
+    ecs::prelude::{Component, Read, World, WorldExt, Write},
+    error::Error,
+    game_data::{DataDispose, DataInit},
+    state::{State, StateData, StateMachine, TransEvent},
     state_event::{StateEvent, StateEventReader},
     ui::UiEvent,
 };
@@ -41,7 +43,11 @@ use {
 /// - `R`: `EventReader` implementation for the given event type `E`
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct CoreApplication<'a, T, E = StateEvent, R = StateEventReader> {
+pub struct CoreApplication<'a, T, E = StateEvent, R = StateEventReader>
+where
+    T: DataDispose + 'static,
+    E: 'static,
+{
     /// The world
     #[derivative(Debug = "ignore")]
     world: World,
@@ -50,6 +56,8 @@ pub struct CoreApplication<'a, T, E = StateEvent, R = StateEventReader> {
     #[derivative(Debug = "ignore")]
     events: Vec<E>,
     event_reader_id: ReaderId<Event>,
+    #[derivative(Debug = "ignore")]
+    trans_reader_id: ReaderId<TransEvent<T, E>>,
     states: StateMachine<'a, T, E>,
     ignore_window_close: bool,
     data: T,
@@ -64,25 +72,27 @@ pub struct CoreApplication<'a, T, E = StateEvent, R = StateEventReader> {
 ///
 /// # Logging
 ///
-/// Amethyst performs logging internally using the [log] crate. By default, `Application` will
-/// initialize a global logger that simply sends logs to the console. You can take advantage of
-/// this and use the logging macros in `log` once you've created your `Application` instance:
+/// Amethyst performs logging internally using the [log] crate. By default, `CoreApplication`
+/// will initialize a global logger that simply sends logs to the console.
+/// You can take advantage of this and use the logging macros in `log` once
+/// you've created your `CoreApplication` instance:
 ///
 /// ```
-/// extern crate amethyst;
-/// #[macro_use]
-/// extern crate log;
-///
 /// use amethyst::prelude::*;
 /// use amethyst::core::transform::{Parent, Transform};
 /// use amethyst::ecs::prelude::System;
+///
+/// use log::{info, warn};
 ///
 /// struct NullState;
 /// impl EmptyState for NullState {}
 ///
 /// fn main() -> amethyst::Result<()> {
+///     amethyst::start_logger(Default::default());
+///
 ///     // Build the application instance to initialize the default logger.
-///     let mut game = Application::build("assets/", NullState)?
+///     let assets_dir = "assets/";
+///     let mut game = Application::build(assets_dir, NullState)?
 ///         .build(())?;
 ///
 ///     // Now logging can be performed as normal.
@@ -97,11 +107,6 @@ pub struct CoreApplication<'a, T, E = StateEvent, R = StateEventReader> {
 /// [log], and it will be used instead of the default logger:
 ///
 /// ```
-/// extern crate amethyst;
-/// #[macro_use]
-/// extern crate log;
-/// extern crate env_logger;
-///
 /// use amethyst::prelude::*;
 /// use amethyst::core::transform::{Parent, Transform};
 /// use amethyst::ecs::prelude::System;
@@ -116,7 +121,8 @@ pub struct CoreApplication<'a, T, E = StateEvent, R = StateEventReader> {
 ///
 ///     // The default logger will be automatically disabled and any logging amethyst does
 ///     // will go through your custom logger.
-///     let mut game = Application::build("assets/", NullState)?
+///     let assets_dir = "assets/";
+///     let mut game = Application::build(assets_dir, NullState)?
 ///         .build(())?;
 ///
 ///     Ok(())
@@ -128,13 +134,14 @@ pub type Application<'a, T> = CoreApplication<'a, T, StateEvent, StateEventReade
 
 impl<'a, T, E, R> CoreApplication<'a, T, E, R>
 where
+    T: DataDispose + 'static,
     E: Clone + Send + Sync + 'static,
 {
-    /// Creates a new Application with the given initial game state.
+    /// Creates a new CoreApplication with the given initial game state.
     /// This will create and allocate all the needed resources for
     /// the event loop of the game engine. It is a shortcut for convenience
     /// if you need more control over how the engine is configured you should
-    /// be using [build](struct.Application.html#method.build) instead.
+    /// be using [build](struct.CoreApplication.html#method.build) instead.
     ///
     /// # Parameters
     ///
@@ -145,8 +152,8 @@ where
     ///
     /// # Returns
     ///
-    /// Returns a `Result` type wrapping the `Application` type. See
-    /// [errors](struct.Application.html#errors) for a full list of
+    /// Returns a `Result` type wrapping the `CoreApplication` type. See
+    /// [errors](struct.CoreApplication.html#errors) for a full list of
     /// possible errors that can happen in the creation of a Application object.
     ///
     /// # Type Parameters
@@ -160,7 +167,7 @@ where
     ///
     /// - `a`: The lifetime of the `State` objects.
     /// - `b`: This lifetime is inherited from `specs` and `shred`, it is
-    ///        the minimum lifetime of the systems used by `Application`
+    ///        the minimum lifetime of the systems used by `CoreApplication`
     ///
     /// # Errors
     ///
@@ -175,10 +182,16 @@ where
     /// struct NullState;
     /// impl EmptyState for NullState {}
     ///
-    /// let mut game = Application::new("assets/", NullState, ()).expect("Failed to initialize");
+    /// # fn main() -> amethyst::Result<()> {
+    /// #
+    /// let assets_dir = "assets/";
+    /// let mut game = Application::new(assets_dir, NullState, ())?;
     /// game.run();
+    ///
+    /// #     Ok(())
+    /// # }
     /// ~~~
-    pub fn new<P, S, I>(path: P, initial_state: S, init: I) -> Result<Self>
+    pub fn new<P, S, I>(path: P, initial_state: S, init: I) -> Result<Self, Error>
     where
         P: AsRef<Path>,
         S: State<T, E> + 'a,
@@ -193,7 +206,7 @@ where
     ///
     /// This is identical in function to
     /// [ApplicationBuilder::new](struct.ApplicationBuilder.html#method.new).
-    pub fn build<P, S>(path: P, initial_state: S) -> Result<ApplicationBuilder<S, E, R>>
+    pub fn build<P, S>(path: P, initial_state: S) -> Result<ApplicationBuilder<S, T, E, R>, Error>
     where
         P: AsRef<Path>,
         S: State<T, E> + 'a,
@@ -210,17 +223,29 @@ where
     /// # Examples
     ///
     /// See the example supplied in the
-    /// [`new`](struct.Application.html#examples) method.
+    /// [`new`](struct.CoreApplication.html#examples) method.
     pub fn run(&mut self)
     where
         for<'b> R: EventReader<'b, Event = E>,
     {
+        #[cfg(feature = "sentry")]
+        let _sentry_guard = if let Some(dsn) = option_env!("SENTRY_DSN") {
+            let guard = sentry::init(dsn);
+            register_panic_handler();
+            Some(guard)
+        } else {
+            None
+        };
+
         self.initialize();
         self.world.write_resource::<Stopwatch>().start();
         while self.states.is_running() {
             self.advance_frame();
-
-            self.world.write_resource::<FrameLimiter>().wait();
+            {
+                #[cfg(feature = "profiler")]
+                profile_scope!("frame_limiter wait");
+                self.world.write_resource::<FrameLimiter>().wait();
+            }
             {
                 let elapsed = self.world.read_resource::<Stopwatch>().elapsed();
                 let mut time = self.world.write_resource::<Time>();
@@ -249,10 +274,10 @@ where
         if self.ignore_window_close {
             false
         } else {
-            use renderer::WindowEvent;
+            use crate::winit::WindowEvent;
             let world = &mut self.world;
             let reader_id = &mut self.event_reader_id;
-            world.exec(|ev: Read<EventChannel<Event>>| {
+            world.exec(|ev: Read<'_, EventChannel<Event>>| {
                 ev.read(reader_id).any(|e| {
                     if cfg!(target_os = "ios") {
                         if let Event::WindowEvent {
@@ -264,16 +289,14 @@ where
                         } else {
                             false
                         }
+                    } else if let Event::WindowEvent {
+                        event: WindowEvent::CloseRequested,
+                        ..
+                    } = e
+                    {
+                        true
                     } else {
-                        if let Event::WindowEvent {
-                            event: WindowEvent::CloseRequested,
-                            ..
-                        } = e
-                        {
-                            true
-                        } else {
-                            false
-                        }
+                        false
                     }
                 })
             })
@@ -290,6 +313,32 @@ where
             let world = &mut self.world;
             let states = &mut self.states;
             states.stop(StateData::new(world, &mut self.data));
+        }
+
+        // Read the Trans queue and apply changes.
+        {
+            let mut world = &mut self.world;
+            let states = &mut self.states;
+            let reader = &mut self.trans_reader_id;
+
+            let trans = world
+                .read_resource::<EventChannel<TransEvent<T, E>>>()
+                .read(reader)
+                .map(|e| e())
+                .collect::<Vec<_>>();
+            for tr in trans {
+                states.transition(tr, StateData::new(&mut world, &mut self.data));
+            }
+        }
+
+        {
+            #[cfg(feature = "profiler")]
+            profile_scope!("run_callback_queue");
+            let mut world = &mut self.world;
+            let receiver = world.read_resource::<CallbackQueue>().receiver.clone();
+            while let Ok(func) = receiver.try_recv() {
+                func(&mut world);
+            }
         }
 
         {
@@ -310,18 +359,21 @@ where
             }
         }
         {
-            let do_fixed = {
-                let time = self.world.write_resource::<Time>();
-                time.last_fixed_update().elapsed() >= time.fixed_time()
-            };
             #[cfg(feature = "profiler")]
             profile_scope!("fixed_update");
-            if do_fixed {
+
+            {
+                self.world.write_resource::<Time>().start_fixed_update();
+            }
+            while self.world.write_resource::<Time>().step_fixed_update() {
                 self.states
                     .fixed_update(StateData::new(&mut self.world, &mut self.data));
+            }
+            {
                 self.world.write_resource::<Time>().finish_fixed_update();
             }
-
+        }
+        {
             #[cfg(feature = "profiler")]
             profile_scope!("update");
             self.states
@@ -331,46 +383,48 @@ where
         #[cfg(feature = "profiler")]
         profile_scope!("maintain");
         self.world.maintain();
-
-        // TODO: replace this with a more customizable method.
-        // TODO: effectively, the user should have more control over error handling here
-        // TODO: because right now the app will just exit in case of an error.
-        self.world.write_resource::<Errors>().print_and_exit();
     }
 
     /// Cleans up after the quit signal is received.
     fn shutdown(&mut self) {
         info!("Engine is shutting down");
-
-        // Placeholder.
+        self.data.dispose(&mut self.world);
     }
 }
 
 #[cfg(feature = "profiler")]
-impl<'a, T, E, R> Drop for CoreApplication<'a, T, E, R> {
+impl<'a, T, E, R> Drop for CoreApplication<'a, T, E, R>
+where
+    T: DataDispose,
+{
     fn drop(&mut self) {
         // TODO: Specify filename in config.
-        use utils::application_root_dir;
-        let path = format!("{}/thread_profile.json", application_root_dir());
-        write_profile(path.as_str());
+        use crate::utils::application_root_dir;
+        let app_root = application_root_dir().expect("application root dir to exist");
+        let path = app_root.join("thread_profile.json");
+        write_profile(path.to_str().expect("application root dir to be a string"));
     }
 }
 
 /// `ApplicationBuilder` is an interface that allows for creation of an
-/// [`Application`](struct.Application.html)
+/// [`CoreApplication`](struct.CoreApplication.html)
 /// using a custom set of configuration. This is the normal way an
-/// [`Application`](struct.Application.html)
+/// [`CoreApplication`](struct.CoreApplication.html)
 /// object is created.
-pub struct ApplicationBuilder<S, E, R> {
+#[allow(missing_debug_implementations)]
+pub struct ApplicationBuilder<S, T, E, R> {
     // config: Config,
     initial_state: S,
     /// Used by bundles to access the world directly
     pub world: World,
     ignore_window_close: bool,
-    phantom: PhantomData<(E, R)>,
+    phantom: PhantomData<(T, E, R)>,
 }
 
-impl<S, E, X> ApplicationBuilder<S, E, X> {
+impl<S, T, E, X> ApplicationBuilder<S, T, E, X>
+where
+    T: DataDispose + 'static,
+{
     /// Creates a new [ApplicationBuilder](struct.ApplicationBuilder.html) instance
     /// that wraps the initial_state. This is the more verbose way of initializing
     /// your application if you require specific configuration details to be changed
@@ -382,8 +436,8 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     ///
     /// # Returns
     ///
-    /// Returns a `Result` type wrapping the `Application` type. See
-    /// [errors](struct.Application.html#errors) for a full list of
+    /// Returns a `Result` type wrapping the `CoreApplication` type. See
+    /// [errors](struct.CoreApplication.html#errors) for a full list of
     /// possible errors that can happen in the creation of a Application object.
     ///
     /// # Type parameters
@@ -395,11 +449,11 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     ///
     /// - `a`: The lifetime of the `State` objects.
     /// - `b`: This lifetime is inherited from `specs` and `shred`, it is
-    ///        the minimum lifetime of the systems used by `Application`
+    ///        the minimum lifetime of the systems used by `CoreApplication`
     ///
     /// # Errors
     ///
-    /// Application will return an error if the internal threadpool fails
+    /// CoreApplication will return an error if the internal threadpool fails
     /// to initialize correctly because of systems resource limitations
     ///
     /// # Examples
@@ -412,12 +466,14 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     /// struct NullState;
     /// impl EmptyState for NullState {}
     ///
+    /// # fn main() -> amethyst::Result<()> {
+    /// #
     /// // initialize the builder, the `ApplicationBuilder` object
     /// // follows the use pattern of most builder objects found
     /// // in the rust ecosystem. Each function modifies the object
     /// // returning a new object with the modified configuration.
-    /// let mut game = Application::build("assets/", NullState)
-    ///     .expect("Failed to initialize")
+    /// let assets_dir = "assets/";
+    /// let mut game = Application::build(assets_dir, NullState)?
     ///
     /// // components can be registered at this stage
     ///     .register::<Parent>()
@@ -425,15 +481,15 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     ///
     /// // lastly we can build the Application object
     /// // the `build` function takes the user defined game data initializer as input
-    ///     .build(())
-    ///     .expect("Failed to create Application");
+    ///     .build(())?;
     ///
     /// // the game instance can now be run, this exits only when the game is done
     /// game.run();
+    ///
+    /// # Ok(())
+    /// # }
     /// ~~~
-    pub fn new<P: AsRef<Path>>(path: P, initial_state: S) -> Result<Self> {
-        use rustc_version_runtime;
-
+    pub fn new<P: AsRef<Path>>(path: P, initial_state: S) -> Result<Self, Error> {
         if !log_enabled!(Level::Error) {
             eprintln!(
                 "WARNING: No logger detected! Did you forget to call `amethyst::start_logger()`?"
@@ -444,6 +500,13 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
         info!("Version: {}", env!("CARGO_PKG_VERSION"));
         info!("Platform: {}", env!("VERGEN_TARGET_TRIPLE"));
         info!("Amethyst git commit: {}", env!("VERGEN_SHA"));
+        #[cfg(feature = "sentry")]
+        {
+            if let Some(sentry) = option_env!("SENTRY_DSN") {
+                info!("Sentry DSN: {}", sentry);
+            }
+        }
+
         let rustc_meta = rustc_version_runtime::version_meta();
         info!(
             "Rustc version: {} {:?}",
@@ -453,6 +516,15 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
             info!("Rustc git commit: {}", hash);
         }
 
+        let thread_count: Option<usize> = env::var("AMETHYST_NUM_THREADS")
+            .as_ref()
+            .map(|s| {
+                s.as_str()
+                    .parse()
+                    .expect("AMETHYST_NUM_THREADS was provided but is not a valid number!")
+            })
+            .ok();
+
         let mut world = World::new();
 
         let thread_pool_builder = ThreadPoolBuilder::new();
@@ -460,22 +532,29 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
         let thread_pool_builder = thread_pool_builder.start_handler(|_index| {
             register_thread_with_profiler();
         });
-        let pool = thread_pool_builder
-            .build()
-            .map(Arc::new)
-            .map_err(|err| Error::Core(err.description().to_string().into()))?;
-        world.add_resource(Loader::new(path.as_ref().to_owned(), pool.clone()));
-        world.add_resource(pool);
-        world.add_resource(EventChannel::<Event>::with_capacity(2000));
-        world.add_resource(EventChannel::<UiEvent>::with_capacity(40));
-        world.add_resource(Errors::default());
-        world.add_resource(FrameLimiter::default());
-        world.add_resource(Stopwatch::default());
-        world.add_resource(Time::default());
+        let pool: ArcThreadPool;
+        if let Some(thread_count) = thread_count {
+            debug!("Running Amethyst with fixed thread pool: {}", thread_count);
+            pool = thread_pool_builder
+                .num_threads(thread_count)
+                .build()
+                .map(Arc::new)?;
+        } else {
+            pool = thread_pool_builder.build().map(Arc::new)?;
+        }
+        world.insert(Loader::new(path.as_ref().to_owned(), pool.clone()));
+        world.insert(pool);
+        world.insert(EventChannel::<Event>::with_capacity(2000));
+        world.insert(EventChannel::<UiEvent>::with_capacity(40));
+        world.insert(EventChannel::<TransEvent<T, StateEvent>>::with_capacity(2));
+        world.insert(FrameLimiter::default());
+        world.insert(Stopwatch::default());
+        world.insert(Time::default());
+        world.insert(CallbackQueue::default());
 
         world.register::<Named>();
 
-        Ok(ApplicationBuilder {
+        Ok(Self {
             initial_state,
             world,
             ignore_window_close: false,
@@ -521,16 +600,19 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     ///     // There are a few common containers, VecStorage and HashMapStorage
     ///     // are the most common used.
     ///     //
-    ///     // See the documentation on the specs::Storage trait for more information.
+    ///     // See the documentation on the ecs::Storage trait for more information.
     ///     // https://docs.rs/specs/0.9.5/specs/struct.Storage.html
     ///     type Storage = HashMapStorage<Velocity>;
     /// }
     ///
     /// // After creating a builder, we can add any number of components
     /// // using the register method.
-    /// Application::build("assets/", NullState)
-    ///     .expect("Failed to initialize")
+    /// # fn main() -> amethyst::Result<()> {
+    /// let assets_dir = "assets/";
+    /// let mut game = Application::build(assets_dir, NullState)?
     ///     .register::<Velocity>();
+    /// #     Ok(())
+    /// # }
     /// ~~~
     ///
     pub fn register<C>(mut self) -> Self
@@ -580,17 +662,20 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     ///     user: String
     /// }
     ///
+    /// # fn main() -> amethyst::Result<()> {
     /// let score_board = HighScores(Vec::new());
-    /// Application::build("assets/", NullState)
-    ///     .expect("Failed to initialize")
+    /// let assets_dir = "assets/";
+    /// let mut game = Application::build(assets_dir, NullState)?
     ///     .with_resource(score_board);
+    /// #     Ok(())
+    /// # }
     ///
     /// ~~~
     pub fn with_resource<R>(mut self, resource: R) -> Self
     where
         R: Resource,
     {
-        self.world.add_resource(resource);
+        self.world.insert(resource);
         self
     }
 
@@ -619,27 +704,29 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     ///
     /// ~~~no_run
     /// use amethyst::prelude::*;
-    /// use amethyst::assets::{Directory, Loader};
-    /// use amethyst::renderer::ObjFormat;
+    /// use amethyst::assets::{Directory, Loader, Handle};
+    /// use amethyst::renderer::{Mesh, formats::mesh::ObjFormat};
     /// use amethyst::ecs::prelude::World;
     ///
-    /// let mut game = Application::build("assets/", LoadingState)
-    ///     .expect("Failed to initialize")
+    /// # fn main() -> amethyst::Result<()> {
+    /// let assets_dir = "assets/";
+    /// let mut game = Application::build(assets_dir, LoadingState)?
     ///     // Register the directory "custom_directory" under the name "resources".
     ///     .with_source("custom_store", Directory::new("custom_directory"))
-    ///     .build(GameDataBuilder::default())
-    ///     .expect("Failed to build game")
+    ///     .build(GameDataBuilder::default())?
     ///     .run();
+    /// #     Ok(())
+    /// # }
     ///
     /// struct LoadingState;
-    /// impl<'a, 'b> SimpleState<'a, 'b> for LoadingState {
-    ///     fn on_start(&mut self, data: StateData<GameData>) {
+    /// impl SimpleState for LoadingState {
+    ///     fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
     ///         let storage = data.world.read_resource();
     ///
     ///         let loader = data.world.read_resource::<Loader>();
     ///         // Load a teapot mesh from the directory that registered above.
-    ///         let mesh = loader.load_from("teapot", ObjFormat, (), "custom_directory",
-    ///                                     (), &storage);
+    ///         let mesh: Handle<Mesh> =
+    ///             loader.load_from("teapot", ObjFormat, "custom_directory", (), &storage);
     ///     }
     /// }
     /// ~~~
@@ -655,6 +742,60 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
         self
     }
 
+    /// Registers the default asset store with the loader logic of the Application.
+    ///
+    /// # Parameters
+    ///
+    /// - `store`: The asset store being registered.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `S`: A `Store` asset loader. Typically this is a [`Directory`](../amethyst_assets/struct.Directory.html).
+    ///
+    /// # Returns
+    ///
+    /// This function returns ApplicationBuilder after it has modified it.
+    ///
+    /// # Examples
+    ///
+    /// ~~~no_run
+    /// use amethyst::prelude::*;
+    /// use amethyst::assets::{Directory, Loader, Handle};
+    /// use amethyst::renderer::{Mesh, formats::mesh::ObjFormat};
+    /// use amethyst::ecs::prelude::World;
+    ///
+    /// # fn main() -> amethyst::Result<()> {
+    /// let assets_dir = "assets/";
+    /// let mut game = Application::build(assets_dir, LoadingState)?
+    ///     // Register the directory "custom_directory" as default source for the loader.
+    ///     .with_default_source(Directory::new("custom_directory"))
+    ///     .build(GameDataBuilder::default())?
+    ///     .run();
+    /// #     Ok(())
+    /// # }
+    ///
+    /// struct LoadingState;
+    /// impl SimpleState for LoadingState {
+    ///     fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
+    ///         let storage = data.world.read_resource();
+    ///
+    ///         let loader = data.world.read_resource::<Loader>();
+    ///         // Load a teapot mesh from the directory that registered above.
+    ///         let mesh: Handle<Mesh> = loader.load("teapot", ObjFormat, (), &storage);
+    ///     }
+    /// }
+    /// ~~~
+    pub fn with_default_source<O>(self, store: O) -> Self
+    where
+        O: Source,
+    {
+        {
+            let mut loader = self.world.write_resource::<Loader>();
+            loader.set_default_source(store);
+        }
+        self
+    }
+
     /// Sets the maximum frames per second of this game.
     ///
     /// # Parameters
@@ -666,8 +807,7 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     ///
     /// This function returns the ApplicationBuilder after modifying it.
     pub fn with_frame_limit(mut self, strategy: FrameRateLimitStrategy, max_fps: u32) -> Self {
-        self.world
-            .add_resource(FrameLimiter::new(strategy, max_fps));
+        self.world.insert(FrameLimiter::new(strategy, max_fps));
         self
     }
 
@@ -681,7 +821,7 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     ///
     /// This function returns the ApplicationBuilder after modifying it.
     pub fn with_frame_limit_config(mut self, config: FrameRateLimitConfig) -> Self {
-        self.world.add_resource(FrameLimiter::from_config(config));
+        self.world.insert(FrameLimiter::from_config(config));
         self
     }
 
@@ -735,7 +875,7 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
     ///
     /// See the [example show for `ApplicationBuilder::new()`](struct.ApplicationBuilder.html#examples)
     /// for an example on how this method is used.
-    pub fn build<'a, T, I>(mut self, init: I) -> Result<CoreApplication<'a, T, E, X>>
+    pub fn build<'a, I>(mut self, init: I) -> Result<CoreApplication<'a, T, E, X>, Error>
     where
         S: State<T, E> + 'a,
         I: DataInit<T>,
@@ -751,11 +891,15 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
         profile_scope!("new");
 
         let mut reader = X::default();
-        reader.setup(&mut self.world.res);
+        reader.setup(&mut self.world);
         let data = init.build(&mut self.world);
         let event_reader_id = self
             .world
-            .exec(|mut ev: Write<EventChannel<Event>>| ev.register_reader());
+            .exec(|mut ev: Write<'_, EventChannel<Event>>| ev.register_reader());
+
+        let trans_reader_id = self
+            .world
+            .exec(|mut ev: Write<'_, EventChannel<TransEvent<T, E>>>| ev.register_reader());
 
         Ok(CoreApplication {
             world: self.world,
@@ -765,6 +909,7 @@ impl<S, E, X> ApplicationBuilder<S, E, X> {
             ignore_window_close: self.ignore_window_close,
             data,
             event_reader_id,
+            trans_reader_id,
         })
     }
 }

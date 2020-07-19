@@ -20,14 +20,14 @@
 //! ```
 //! use std::time::Duration;
 //!
-//! # extern crate amethyst;
 //! use amethyst::prelude::*;
 //! use amethyst::core::frame_limiter::FrameRateLimitStrategy;
 //!
 //! # struct GameState;
-//! # impl<'a, 'b> SimpleState<'a, 'b> for GameState {}
+//! # impl SimpleState for GameState {}
 //! # fn main() -> amethyst::Result<()> {
-//! let mut game = Application::build("./", GameState)?
+//! let assets_dir = "./";
+//! let mut game = Application::build(assets_dir, GameState)?
 //!     .with_frame_limit(
 //!         FrameRateLimitStrategy::SleepAndYield(Duration::from_millis(2)),
 //!         144,
@@ -46,10 +46,9 @@
 //! * `Yield` will call [`thread::yield_now`] repeatedly until the frame duration has
 //!   passed. This will result in the most accurate frame timings, but effectively guarantees
 //!   that one CPU core will be fully utilized during the frame's idle time.
-//! * `Sleep` will call [`thread::sleep`] with a duration of 0 milliseconds until the
-//!   frame duration has passed. This will result in lower CPU usage while the game is idle, but
-//!   risks fluctuations in frame timing if the operating system doesn't wake the game until
-//!   after the frame should have started.
+//! * `Sleep` will sleep for the approximate remainder of the frame duration. This will result in
+//!   lower CPU usage while the game is idle, but risks fluctuations in frame timing if the
+//!   operating system doesn't wake the game until after the frame should have started.
 //! * `SleepAndYield` will sleep until there's only a small amount of time left in the frame,
 //!   and then will yield until the next frame starts. This approach attempts to get the
 //!   consistent frame timings of yielding, while reducing CPU usage compared to the yield-only
@@ -72,6 +71,9 @@ use std::{
     thread::{sleep, yield_now},
     time::{Duration, Instant},
 };
+
+use derive_new::new;
+use serde::{Deserialize, Serialize};
 
 const ZERO: Duration = Duration::from_millis(0);
 
@@ -113,19 +115,20 @@ impl Default for FrameRateLimitStrategy {
 /// # Examples
 ///
 /// ```no_run
-/// # extern crate amethyst;
 /// use amethyst::prelude::*;
 /// use amethyst::core::frame_limiter::FrameRateLimitConfig;
 ///
-/// let config = FrameRateLimitConfig::load("./resources/frame_limiter.ron");
+/// let config = FrameRateLimitConfig::load("./config/frame_limiter.ron");
 /// ```
 ///
 /// [`FrameLimiter`]: ./struct.FrameLimiter.html
 /// [`Config`]: ../../amethyst_config/trait.Config.html
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, new)]
 pub struct FrameRateLimitConfig {
-    strategy: FrameRateLimitStrategy,
-    fps: u32,
+    /// Frame rate limiting strategy.
+    pub strategy: FrameRateLimitStrategy,
+    /// The FPS to limit the game loop execution.
+    pub fps: u32,
 }
 
 impl Default for FrameRateLimitConfig {
@@ -222,8 +225,13 @@ impl FrameLimiter {
 
     fn do_sleep(&self, stop_on_remaining: Duration) {
         let frame_duration = self.frame_duration - stop_on_remaining;
-        while Instant::now() - self.last_call < frame_duration {
-            sleep(ZERO);
+        loop {
+            let elapsed = Instant::now() - self.last_call;
+            if elapsed >= frame_duration {
+                break;
+            } else {
+                sleep(frame_duration - elapsed);
+            }
         }
     }
 }

@@ -1,19 +1,18 @@
 //! Provides structures used to load audio files.
 //!
-use std::result::Result as StdResult;
-
 use amethyst_assets::{
-    Asset, AssetStorage, Handle, Loader, PrefabData, PrefabError, ProcessingState, Result,
+    Asset, AssetStorage, Handle, Loader, PrefabData, ProcessableAsset, ProcessingState,
 };
-use amethyst_core::specs::prelude::{Entity, Read, ReadExpect, VecStorage};
+use amethyst_core::ecs::prelude::{Entity, Read, ReadExpect, VecStorage};
+use amethyst_error::Error;
 
-use formats::AudioData;
+use crate::formats::AudioData;
 
 /// A handle to a source asset.
 pub type SourceHandle = Handle<Source>;
 
 /// A loaded audio file
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Source {
     /// The bytes of this audio source.
     pub bytes: Vec<u8>,
@@ -31,9 +30,9 @@ impl Asset for Source {
     type HandleStorage = VecStorage<SourceHandle>;
 }
 
-impl Into<Result<ProcessingState<Source>>> for AudioData {
-    fn into(self) -> Result<ProcessingState<Source>> {
-        Ok(ProcessingState::Loaded(Source { bytes: self.0 }))
+impl ProcessableAsset for Source {
+    fn process(data: AudioData) -> Result<ProcessingState<Source>, Error> {
+        Ok(ProcessingState::Loaded(Source { bytes: data.0 }))
     }
 }
 
@@ -46,7 +45,8 @@ impl<'a> PrefabData<'a> for AudioData {
         _: Entity,
         system_data: &mut Self::SystemData,
         _: &[Entity],
-    ) -> StdResult<Handle<Source>, PrefabError> {
+        _: &[Entity],
+    ) -> Result<Handle<Source>, Error> {
         Ok(system_data
             .0
             .load_from_data(self.clone(), (), &system_data.1))

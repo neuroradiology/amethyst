@@ -4,27 +4,50 @@
 use std::{
     fmt::{Debug, Formatter, Result as FmtResult},
     io::Cursor,
+    sync::Arc,
 };
 
-use cpal::OutputDevices;
-use rodio::{default_output_device, output_devices, Decoder, Device, Sink, Source as RSource};
+use cpal::traits::DeviceTrait;
+use log::error;
+use rodio::{
+    default_output_device, output_devices, Decoder, Device, Devices, OutputDevices, Sink,
+    Source as RSource,
+};
 
-use amethyst_core::shred::Resources;
+use amethyst_core::ecs::World;
 
-use {sink::AudioSink, source::Source, DecoderError};
+use crate::{sink::AudioSink, source::Source, DecoderError};
 
 /// A speaker(s) through which audio can be played.
 ///
 /// By convention, the default output is stored as a resource in the `World`.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct Output {
-    pub(crate) device: Device,
+    pub(crate) device: Arc<Device>,
+}
+
+/// Convenience method for opening the default output device.
+///
+/// Since most modern hardware features audio output, this implementation fails if a device can't
+/// be initialized. Use an alternative initialization scheme if running on hardware without an
+/// integrated audio chip.
+impl Default for Output {
+    fn default() -> Self {
+        default_output_device()
+            .map(|device| Output {
+                device: Arc::new(device),
+            })
+            .expect("No default output device")
+    }
 }
 
 impl Output {
     /// Gets the name of the output
     pub fn name(&self) -> String {
-        self.device.name()
+        self.device.name().unwrap_or_else(|e| {
+            error!("Failed to determine output device name: {}", e);
+            String::from("<unnamed_output_device>")
+        })
     }
 
     /// Play a sound once.  A volume of 1.0 is unchanged, while 0.0 is silent.
@@ -73,7 +96,7 @@ impl Output {
 }
 
 impl Debug for Output {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Output")
             .field("device", &self.name())
             .finish()
@@ -81,37 +104,131 @@ impl Debug for Output {
 }
 
 /// An iterator over outputs
+#[allow(missing_debug_implementations)]
 pub struct OutputIterator {
-    input: OutputDevices,
+    devices: OutputDevices<Devices>,
 }
 
 impl Iterator for OutputIterator {
     type Item = Output;
 
     fn next(&mut self) -> Option<Output> {
-        self.input.next().map(|re| Output { device: re })
+        self.devices.next().map(|device| Output {
+            device: Arc::new(device),
+        })
     }
 }
 
 /// Get the default output, returns none if no outputs are available.
 pub fn default_output() -> Option<Output> {
-    default_output_device().map(|re| Output { device: re })
+    default_output_device().map(|device| Output {
+        device: Arc::new(device),
+    })
 }
 
 /// Get a list of outputs available to the system.
 pub fn outputs() -> OutputIterator {
-    OutputIterator {
-        input: output_devices(),
-    }
+    let devices =
+        output_devices().unwrap_or_else(|e| panic!("Error retrieving output devices: `{}`", e));
+    OutputIterator { devices }
 }
 
 /// Initialize default output
-pub fn init_output(res: &mut Resources) {
+pub fn init_output(world: &mut World) {
     if let Some(o) = default_output() {
-        res.entry::<AudioSink>()
+        world
+            .entry::<AudioSink>()
             .or_insert_with(|| AudioSink::new(&o));
-        res.entry::<Output>().or_insert_with(|| o);
+        world.entry::<Output>().or_insert_with(|| o);
     } else {
         error!("Failed finding a default audio output to hook AudioSink to, audio will not work!")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    use {
+        crate::{output::Output, source::Source, DecoderError},
+        amethyst_utils::app_root_dir::application_root_dir,
+        std::{fs::File, io::Read, vec::Vec},
+    };
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_play_wav() {
+        test_play("tests/sound_test.wav", true)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_play_mp3() {
+        test_play("tests/sound_test.mp3", true);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_play_flac() {
+        test_play("tests/sound_test.flac", true);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_play_ogg() {
+        test_play("tests/sound_test.ogg", true);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_play_fake() {
+        test_play("tests/sound_test.fake", false);
+    }
+
+    // test_play tests the play APIs for Output
+    #[cfg(target_os = "linux")]
+    fn test_play(file_name: &str, should_pass: bool) {
+        // Get the full file path
+        let app_root = application_root_dir().unwrap();
+        let audio_path = app_root.join(file_name);
+
+        // Convert the file contents into a byte vec
+        let mut f = File::open(audio_path).unwrap();
+        let mut buffer = Vec::new();
+        f.read_to_end(&mut buffer).unwrap();
+
+        // Create a Source from those bytes
+        let src = Source { bytes: buffer };
+
+        // Set volume and number of times to play
+        let vol: f32 = 4.0;
+        let n: u16 = 5;
+
+        // Test each of the play APIs
+        let output = Output::default();
+
+        output.play_once(&src, vol);
+
+        output.play_n_times(&src, vol, n);
+
+        let result_try_play_once = output.try_play_once(&src, vol);
+        check_result(result_try_play_once, should_pass);
+
+        let result_try_play_n_times = output.try_play_n_times(&src, vol, n);
+        check_result(result_try_play_n_times, should_pass);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn check_result(result: Result<(), DecoderError>, should_pass: bool) {
+        match result {
+            Ok(_pass) => assert!(
+                should_pass,
+                "Expected `play` result to be Err(..), but was Ok(..)"
+            ),
+            Err(fail) => assert!(
+                !should_pass,
+                "Expected `play` result to be `Ok(..)`, but was {:?}",
+                fail
+            ),
+        };
     }
 }

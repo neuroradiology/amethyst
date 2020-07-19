@@ -1,13 +1,24 @@
 use std::marker::PhantomData;
 
-use amethyst_core::specs::prelude::{
-    Component, DenseVecStorage, Entities, Entity, FlaggedStorage, Join, ReadStorage,
+use amethyst_core::{
+    ecs::{
+        prelude::{
+            Component, DenseVecStorage, Entities, Entity, FlaggedStorage, Join, ReadStorage, World,
+        },
+        shred::{ResourceId, SystemData},
+        storage::GenericReadStorage,
+    },
+    ParentHierarchy,
 };
+use amethyst_window::ScreenDimensions;
+
+use serde::{Deserialize, Serialize};
 
 use super::{Anchor, ScaleMode, Stretch};
 
 /// Utility `SystemData` for finding UI entities based on `UiTransform` id
 #[derive(SystemData)]
+#[allow(missing_debug_implementations)]
 pub struct UiFinder<'a> {
     entities: Entities<'a>,
     storage: ReadStorage<'a, UiTransform>,
@@ -32,6 +43,8 @@ pub struct UiTransform {
     pub id: String,
     /// Indicates where the element sits, relative to the parent (or to the screen, if there is no parent)
     pub anchor: Anchor,
+    /// Indicates where the element sits, relative to itself
+    pub pivot: Anchor,
     /// If a child ui element needs to fill its parent this can be used to stretch it to the appropriate size.
     pub stretch: Stretch,
     /// X coordinate, 0 is the left edge of the screen. If scale_mode is set to pixel then the width of the
@@ -51,11 +64,6 @@ pub struct UiTransform {
     pub width: f32,
     /// The height of this UI element.
     pub height: f32,
-    /// The UI element tab order.  When the player presses tab the UI focus will shift to the
-    /// UI element with the next highest tab order, or if another element with the same tab_order
-    /// as this one exists they are ordered according to Entity creation order.  Shift-tab walks
-    /// this ordering backwards.
-    pub tab_order: i32,
     /// Global x position set by the `UiTransformSystem`.
     pub(crate) pixel_x: f32,
     /// Global y position set by the `UiTransformSystem`.
@@ -72,8 +80,11 @@ pub struct UiTransform {
     /// If set to false, the element will behaves as if it was transparent and will let events go to
     /// the next element (for example, the text on a button).
     pub opaque: bool,
+    /// Allows transparent (opaque = false) transforms to still be targeted by the events that pass
+    /// through them.
+    pub transparent_target: bool,
     /// A private field to keep this from being initialized without new.
-    pd: PhantomData<u8>,
+    pd: PhantomData<()>,
 }
 
 impl UiTransform {
@@ -82,23 +93,23 @@ impl UiTransform {
     pub fn new(
         id: String,
         anchor: Anchor,
+        pivot: Anchor,
         x: f32,
         y: f32,
         z: f32,
         width: f32,
         height: f32,
-        tab_order: i32,
     ) -> UiTransform {
         UiTransform {
             id,
             anchor,
+            pivot,
             stretch: Stretch::NoStretch,
             local_x: x,
             local_y: y,
             local_z: z,
             width,
             height,
-            tab_order,
             pixel_x: x,
             pixel_y: y,
             global_z: z,
@@ -106,6 +117,7 @@ impl UiTransform {
             pixel_height: height,
             scale_mode: ScaleMode::Pixel,
             opaque: true,
+            transparent_target: false,
             pd: PhantomData,
         }
     }
@@ -128,13 +140,13 @@ impl UiTransform {
 
     /// Renders this UI element by evaluating transform as a percentage of the parent size,
     /// rather than rendering it with pixel units.
-    pub fn as_percent(mut self) -> Self {
+    pub fn into_percent(mut self) -> Self {
         self.scale_mode = ScaleMode::Percent;
         self
     }
 
     /// Sets the opaque variable to false, allowing ui events to go through this ui element.
-    pub fn as_transparent(mut self) -> Self {
+    pub fn into_transparent(mut self) -> Self {
         self.opaque = false;
         self
     }
@@ -159,10 +171,40 @@ impl UiTransform {
     pub fn global_z(&self) -> f32 {
         self.global_z
     }
+
+    /// Returns the width of this UiTransform (in pixels) as computed by the `UiTransformSystem`.
+    pub fn pixel_width(&self) -> f32 {
+        self.pixel_width
+    }
+
+    /// Returns the height of this UiTransform (in pixels) as computed by the `UiTransformSystem`.
+    pub fn pixel_height(&self) -> f32 {
+        self.pixel_height
+    }
 }
 
 impl Component for UiTransform {
     type Storage = FlaggedStorage<Self, DenseVecStorage<Self>>;
+}
+
+/// Get the (width, height) in pixels of the parent of this `UiTransform`.
+pub fn get_parent_pixel_size<S: GenericReadStorage<Component = UiTransform>>(
+    entity: Entity,
+    hierarchy: &ParentHierarchy,
+    ui_transforms: &S,
+    screen_dimensions: &ScreenDimensions,
+) -> (f32, f32) {
+    let mut parent_width = screen_dimensions.width();
+    let mut parent_height = screen_dimensions.height();
+
+    if let Some(parent) = hierarchy.parent(entity) {
+        if let Some(ui_transform) = ui_transforms.get(parent) {
+            parent_width = ui_transform.pixel_width();
+            parent_height = ui_transform.pixel_height();
+        }
+    }
+
+    (parent_width, parent_height)
 }
 
 #[cfg(test)]
@@ -170,7 +212,16 @@ mod tests {
     use super::*;
     #[test]
     fn inside_local() {
-        let tr = UiTransform::new("".to_string(), Anchor::TopLeft, 0.0, 0.0, 0.0, 1.0, 1.0, 0);
+        let tr = UiTransform::new(
+            "".to_string(),
+            Anchor::TopLeft,
+            Anchor::Middle,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+        );
         let pos = (-0.49, 0.20);
         assert!(tr.position_inside_local(pos.0, pos.1));
         let pos = (-1.49, 1.20);
@@ -179,7 +230,16 @@ mod tests {
 
     #[test]
     fn inside_global() {
-        let tr = UiTransform::new("".to_string(), Anchor::TopLeft, 0.0, 0.0, 0.0, 1.0, 1.0, 0);
+        let tr = UiTransform::new(
+            "".to_string(),
+            Anchor::TopLeft,
+            Anchor::Middle,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+        );
         let pos = (-0.49, 0.20);
         assert!(tr.position_inside(pos.0, pos.1));
         let pos = (-1.49, 1.20);

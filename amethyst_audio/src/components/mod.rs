@@ -2,13 +2,16 @@
 
 pub use self::{audio_emitter::AudioEmitter, audio_listener::AudioListener};
 
-use amethyst_assets::{PrefabData, PrefabError};
+use amethyst_assets::PrefabData;
 use amethyst_core::{
-    cgmath::Point3,
-    specs::prelude::{Entity, Read, WriteStorage},
+    ecs::prelude::{Entity, Read, WriteStorage},
+    math::Point3,
 };
+use amethyst_error::Error;
 
-use output::Output;
+use serde::{Deserialize, Serialize};
+
+use crate::output::Output;
 
 mod audio_emitter;
 mod audio_listener;
@@ -16,7 +19,7 @@ mod audio_listener;
 /// `PrefabData` for loading audio components
 ///
 /// For `AudioListener`, the currently registered `Output` in the `World` will be used.
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AudioPrefab {
     emitter: bool,
     /// Left, Right
@@ -36,15 +39,15 @@ impl<'a> PrefabData<'a> for AudioPrefab {
         entity: Entity,
         system_data: &mut Self::SystemData,
         _: &[Entity],
-    ) -> Result<(), PrefabError> {
+        _: &[Entity],
+    ) -> Result<(), Error> {
         if self.emitter {
             system_data.0.insert(entity, AudioEmitter::default())?;
         }
-        if let (Some((left_ear, right_ear)), Some(output)) = (self.listener, &system_data.2) {
+        if let Some((left_ear, right_ear)) = self.listener {
             system_data.1.insert(
                 entity,
                 AudioListener {
-                    output: (*output).clone(),
                     left_ear,
                     right_ear,
                 },

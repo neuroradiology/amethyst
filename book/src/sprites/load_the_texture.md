@@ -1,24 +1,23 @@
 # Load The `Texture`
 
-The first part of loading sprites into Amethyst is to read the image into memory. Currently Amethyst supports [`PngFormat`][doc_fmt_png], [`BmpFormat`][doc_fmt_bmp], [`JpgFormat`][doc_fmt_jpg] and [`TgaFormat`][doc_fmt_tga].
+The first part of loading sprites into Amethyst is to read the image into memory.
 
-The following snippet shows how to load a PNG image:
+The following snippet shows how to load a PNG / JPEG / GIF / ICO image:
 
-```rust,no_run,noplaypen
+```rust,edition2018,no_run,noplaypen
 # extern crate amethyst;
-use amethyst::assets::{AssetStorage, Loader};
+use amethyst::assets::{AssetStorage, Handle, Loader};
 use amethyst::prelude::*;
-use amethyst::renderer::{MaterialTextureSet, PngFormat, Texture, TextureMetadata, TextureHandle};
+use amethyst::renderer::{formats::texture::ImageFormat, Texture};
 
-pub fn load_texture<N>(name: N, world: &World) -> TextureHandle
+pub fn load_texture<N>(name: N, world: &World) -> Handle<Texture>
 where
     N: Into<String>,
 {
     let loader = world.read_resource::<Loader>();
     loader.load(
         name,
-        PngFormat,
-        TextureMetadata::srgb(),
+        ImageFormat::default(),
         (),
         &world.read_resource::<AssetStorage<Texture>>(),
     )
@@ -27,42 +26,53 @@ where
 #[derive(Debug)]
 struct ExampleState;
 
-impl<'a, 'b> SimpleState<'a, 'b> for ExampleState {
-    fn on_start(&mut self, data: StateData<GameData>) {
+impl SimpleState for ExampleState {
+    fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
         let texture_handle = load_texture("texture/sprite_sheet.png", &data.world);
-
-        let texture_id = 0;
-        data.world
-            .write_resource::<MaterialTextureSet>()
-            .insert(texture_id, texture_handle);
     }
 }
 #
 # fn main() {}
 ```
 
-There are two things that may surprise you.
+There is one thing that may surprise you.
 
-* Firstly, you don't get back the [`Texture`][doc_tex], but a [`TextureHandle`][doc_tex_hd], which is a cloneable reference to the texture.
+* You don't get back the [`Texture`][doc_tex], but a [`Handle<Texture>`][doc_tex_hd], which is a 
+cloneable reference to the texture.
 
     When you use [`loader.load(..)`][doc_load] to load an [`Asset`][doc_asset], the method returns immediately with a unique handle for your texture. The actual asset loading is handled asynchronously, so if you attempt to use the texture handle to retrieve the texture, such as with [`world.read_resource::<AssetStorage<Texture>>()`][doc_read_resource][`.get(texture_handle)`][doc_asset_get], you will get a `None` until the `Texture` has finished loading.
 
-* Secondly, you have to insert the texture into a `MaterialTextureSet`, with an arbitrary `u64` ID.
+The loaded texture will use nearest filtering, i.e. the pixels won't be interpolated.
+If you want to tweak the sampling, you can change `ImageFormat::default()` to
+`ImageFormat(my_config)`, and create your own `my_config` like this:
 
-    The ID is necessary to link the [`Texture`][doc_tex] (loaded image) to the [`SpriteSheet`][doc_ss] (layout data), which takes the texture ID instead of the handle.
+```rust,edition2018,no_run,noplaypen
+# extern crate amethyst;
+use amethyst::renderer::rendy::hal::image::{Filter, SamplerInfo, WrapMode};
+use amethyst::renderer::rendy::texture::image::{ImageTextureConfig, Repr, TextureKind};
 
-    You pick the texture ID based on how you want to reference it. For example, you might have an application configuration that says `path/to/spritesheet_0.png` is ID `100`, `path/to/spritesheet_1.png` is ID `101`, so you can use that. Or, you might do something clever like calculate an ID based on the path, and if it's already loaded, then you know you don't have to load it again.
+let my_config = ImageTextureConfig {
+    // Determine format automatically
+    format: None,
+    // Color channel
+    repr: Repr::Srgb,
+    // Two-dimensional texture
+    kind: TextureKind::D2,
+    sampler_info: SamplerInfo::new(Filter::Linear, WrapMode::Clamp),
+    // Don't generate mipmaps for this image
+    generate_mips: false,
+    premultiply_alpha: true,
+};
+```
 
-The loaded texture will use linear filter, e.g. screen pixels will be linearly interpolated between the closest image pixels. In layman's terms, if your images have small resolution, sprites will look blury. Use `TextureMetadata::srgb_scale()` instead to avoid such effect. Screen pixel will be taken from nearest pixel of texture in that case.
-
-[doc_asset]: https://www.amethyst.rs/doc/latest/doc/amethyst_assets/trait.Asset.html
-[doc_asset_get]: https://www.amethyst.rs/doc/latest/doc/amethyst_assets/struct.AssetStorage.html#method.get
-[doc_fmt_bmp]: https://www.amethyst.rs/doc/latest/doc/amethyst_renderer/struct.BmpFormat.html
-[doc_fmt_jpg]: https://www.amethyst.rs/doc/latest/doc/amethyst_renderer/struct.JpgFormat.html
-[doc_fmt_png]: https://www.amethyst.rs/doc/latest/doc/amethyst_renderer/struct.PngFormat.html
-[doc_fmt_tga]: https://www.amethyst.rs/doc/latest/doc/amethyst_renderer/struct.TgaFormat.html
-[doc_load]: https://www.amethyst.rs/doc/latest/doc/amethyst_assets/struct.Loader.html#method.load
-[doc_read_resource]: https://www.amethyst.rs/doc/latest/doc/specs/world/struct.World.html#method.read_resource
-[doc_ss]: https://www.amethyst.rs/doc/latest/doc/amethyst_renderer/struct.SpriteSheet.html
-[doc_tex]: https://www.amethyst.rs/doc/latest/doc/amethyst_renderer/struct.Texture.html
-[doc_tex_hd]: https://www.amethyst.rs/doc/latest/doc/amethyst_renderer/type.TextureHandle.html
+[doc_asset]: https://docs.amethyst.rs/stable/amethyst_assets/trait.Asset.html
+[doc_asset_get]: https://docs.amethyst.rs/stable/amethyst_assets/struct.AssetStorage.html#method.get
+[doc_fmt_bmp]: https://docs.amethyst.rs/stable/amethyst_renderer/struct.BmpFormat.html
+[doc_fmt_jpg]: https://docs.amethyst.rs/stable/amethyst_renderer/struct.JpgFormat.html
+[doc_fmt_png]: https://docs.amethyst.rs/stable/amethyst_renderer/struct.PngFormat.html
+[doc_fmt_tga]: https://docs.amethyst.rs/stable/amethyst_renderer/struct.TgaFormat.html
+[doc_load]: https://docs.amethyst.rs/stable/amethyst_assets/struct.Loader.html#method.load
+[doc_read_resource]: https://docs.amethyst.rs/stable/specs/world/struct.World.html#method.read_resource
+[doc_ss]: https://docs.amethyst.rs/stable/amethyst_renderer/struct.SpriteSheet.html
+[doc_tex]: https://docs.amethyst.rs/stable/amethyst_renderer/struct.Texture.html
+[doc_tex_hd]: https://docs.amethyst.rs/stable/amethyst_assets/type.Handle.html

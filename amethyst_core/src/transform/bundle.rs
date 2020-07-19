@@ -1,11 +1,13 @@
 //! ECS transform bundle
 
-use specs::prelude::DispatcherBuilder;
+use amethyst_error::Error;
 use specs_hierarchy::HierarchySystem;
 
-use {
-    bundle::{Result, SystemBundle},
+use crate::{
+    bundle::SystemBundle,
+    ecs::prelude::{DispatcherBuilder, World},
     transform::*,
+    SystemDesc,
 };
 
 /// Transform bundle
@@ -21,7 +23,7 @@ use {
 ///
 /// Panics in `TransformSystem` registration if the bundle is applied twice in the same dispatcher.
 ///
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TransformBundle<'a> {
     dep: &'a [&'a str],
 }
@@ -29,7 +31,9 @@ pub struct TransformBundle<'a> {
 impl<'a> TransformBundle<'a> {
     /// Create a new transform bundle
     pub fn new() -> Self {
-        Default::default()
+        TransformBundle {
+            dep: Default::default(),
+        }
     }
 
     /// Set dependencies for the `TransformSystem`
@@ -40,14 +44,18 @@ impl<'a> TransformBundle<'a> {
 }
 
 impl<'a, 'b, 'c> SystemBundle<'a, 'b> for TransformBundle<'c> {
-    fn build(self, builder: &mut DispatcherBuilder<'a, 'b>) -> Result<()> {
+    fn build(
+        self,
+        world: &mut World,
+        builder: &mut DispatcherBuilder<'a, 'b>,
+    ) -> Result<(), Error> {
         builder.add(
-            HierarchySystem::<Parent>::new(),
+            HierarchySystem::<Parent>::new(world),
             "parent_hierarchy_system",
             self.dep,
         );
         builder.add(
-            TransformSystem::new(),
+            TransformSystemDesc::default().build(world),
             "transform_system",
             &["parent_hierarchy_system"],
         );

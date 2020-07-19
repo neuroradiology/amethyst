@@ -3,32 +3,44 @@
 //!
 //! TODO: Rewrite for new renderer.
 
-extern crate amethyst;
-
 use amethyst::{
     assets::{
-        Completion, Handle, HotReloadBundle, Prefab, PrefabLoader, PrefabLoaderSystem,
+        Completion, Handle, HotReloadBundle, Prefab, PrefabLoader, PrefabLoaderSystemDesc,
         ProgressCounter, RonFormat,
     },
     core::{
-        cgmath::{Quaternion, Rad, Rotation, Rotation3},
+        math::{UnitQuaternion, Vector3},
         timing::Time,
         transform::{Transform, TransformBundle},
     },
-    ecs::prelude::{Entity, Join, Read, ReadStorage, System, Write, WriteStorage},
-    input::{get_key, is_close_requested, is_key_down, InputBundle},
+    derive::SystemDesc,
+    ecs::prelude::{
+        Entity, Join, Read, ReadStorage, System, SystemData, WorldExt, Write, WriteStorage,
+    },
+    input::{
+        get_key, is_close_requested, is_key_down, ElementState, InputBundle, StringBindings,
+        VirtualKeyCode,
+    },
     prelude::*,
-    renderer::{AmbientColor, Camera, DrawShaded, ElementState, Light, PosNormTex, VirtualKeyCode},
-    ui::{UiBundle, UiCreator, UiFinder, UiText},
+    renderer::{
+        light::Light,
+        palette::{Srgb, Srgba},
+        plugins::{RenderShaded3D, RenderToWindow},
+        rendy::mesh::{Normal, Position, TexCoord},
+        resources::AmbientColor,
+        types::DefaultBackend,
+        Camera, RenderingBundle,
+    },
+    ui::{RenderUi, UiBundle, UiCreator, UiFinder, UiText},
     utils::{
         application_root_dir,
-        fps_counter::{FPSCounter, FPSCounterBundle},
+        fps_counter::{FpsCounter, FpsCounterBundle},
         scene::BasicScenePrefab,
     },
     Error,
 };
 
-type MyPrefabData = BasicScenePrefab<Vec<PosNormTex>>;
+type MyPrefabData = BasicScenePrefab<(Vec<Position>, Vec<Normal>, Vec<TexCoord>)>;
 
 #[derive(Default)]
 struct Loading {
@@ -40,19 +52,19 @@ struct Example {
     scene: Handle<Prefab<MyPrefabData>>,
 }
 
-impl<'a, 'b> SimpleState<'a, 'b> for Loading {
-    fn on_start(&mut self, data: StateData<GameData>) {
-        self.prefab = Some(data.world.exec(|loader: PrefabLoader<MyPrefabData>| {
-            loader.load("prefab/renderable.ron", RonFormat, (), &mut self.progress)
+impl SimpleState for Loading {
+    fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
+        self.prefab = Some(data.world.exec(|loader: PrefabLoader<'_, MyPrefabData>| {
+            loader.load("prefab/renderable.ron", RonFormat, &mut self.progress)
         }));
 
-        data.world.exec(|mut creator: UiCreator| {
+        data.world.exec(|mut creator: UiCreator<'_>| {
             creator.create("ui/fps.ron", &mut self.progress);
             creator.create("ui/loading.ron", &mut self.progress);
         });
     }
 
-    fn update(&mut self, data: &mut StateData<GameData>) -> SimpleTrans<'a, 'b> {
+    fn update(&mut self, data: &mut StateData<'_, GameData<'_, '_>>) -> SimpleTrans {
         match self.progress.complete() {
             Completion::Failed => {
                 println!("Failed loading assets: {:?}", self.progress.errors());
@@ -60,7 +72,10 @@ impl<'a, 'b> SimpleState<'a, 'b> for Loading {
             }
             Completion::Complete => {
                 println!("Assets loaded, swapping state");
-                if let Some(entity) = data.world.exec(|finder: UiFinder| finder.find("loading")) {
+                if let Some(entity) = data
+                    .world
+                    .exec(|finder: UiFinder<'_>| finder.find("loading"))
+                {
                     let _ = data.world.delete_entity(entity);
                 }
                 Trans::Switch(Box::new(Example {
@@ -72,8 +87,8 @@ impl<'a, 'b> SimpleState<'a, 'b> for Loading {
     }
 }
 
-impl<'a, 'b> SimpleState<'a, 'b> for Example {
-    fn on_start(&mut self, data: StateData<GameData>) {
+impl SimpleState for Example {
+    fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
         let StateData { world, .. } = data;
 
         world.create_entity().with(self.scene.clone()).build();
@@ -81,9 +96,9 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
 
     fn handle_event(
         &mut self,
-        data: StateData<GameData>,
+        data: StateData<'_, GameData<'_, '_>>,
         event: StateEvent,
-    ) -> SimpleTrans<'a, 'b> {
+    ) -> SimpleTrans {
         let w = data.world;
         if let StateEvent::Window(event) = &event {
             // Exit if user hits Escape or closes the window
@@ -92,53 +107,59 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
             }
             match get_key(&event) {
                 Some((VirtualKeyCode::R, ElementState::Pressed)) => {
-                    w.exec(|mut state: Write<DemoState>| {
-                        state.light_color = [0.8, 0.2, 0.2, 1.0];
+                    w.exec(|mut state: Write<'_, DemoState>| {
+                        state.light_color = Srgb::new(0.8, 0.2, 0.2);
                     });
                 }
                 Some((VirtualKeyCode::G, ElementState::Pressed)) => {
-                    w.exec(|mut state: Write<DemoState>| {
-                        state.light_color = [0.2, 0.8, 0.2, 1.0];
+                    w.exec(|mut state: Write<'_, DemoState>| {
+                        state.light_color = Srgb::new(0.2, 0.8, 0.2);
                     });
                 }
                 Some((VirtualKeyCode::B, ElementState::Pressed)) => {
-                    w.exec(|mut state: Write<DemoState>| {
-                        state.light_color = [0.2, 0.2, 0.8, 1.0];
+                    w.exec(|mut state: Write<'_, DemoState>| {
+                        state.light_color = Srgb::new(0.2, 0.2, 0.8);
                     });
                 }
                 Some((VirtualKeyCode::W, ElementState::Pressed)) => {
-                    w.exec(|mut state: Write<DemoState>| {
-                        state.light_color = [1.0, 1.0, 1.0, 1.0];
+                    w.exec(|mut state: Write<'_, DemoState>| {
+                        state.light_color = Srgb::new(1.0, 1.0, 1.0);
                     });
                 }
                 Some((VirtualKeyCode::A, ElementState::Pressed)) => {
                     w.exec(
-                        |(mut state, mut color): (Write<DemoState>, Write<AmbientColor>)| {
+                        |(mut state, mut color): (
+                            Write<'_, DemoState>,
+                            Write<'_, AmbientColor>,
+                        )| {
                             if state.ambient_light {
                                 state.ambient_light = false;
-                                color.0 = [0.0; 3].into();
+                                color.0 = Srgba::new(0.0, 0.0, 0.0, 0.0);
                             } else {
                                 state.ambient_light = true;
-                                color.0 = [0.01; 3].into();
+                                color.0 = Srgba::new(0.01, 0.01, 0.01, 1.0);
                             }
                         },
                     );
                 }
                 Some((VirtualKeyCode::D, ElementState::Pressed)) => {
                     w.exec(
-                        |(mut state, mut lights): (Write<DemoState>, WriteStorage<Light>)| {
+                        |(mut state, mut lights): (
+                            Write<'_, DemoState>,
+                            WriteStorage<'_, Light>,
+                        )| {
                             if state.directional_light {
                                 state.directional_light = false;
                                 for light in (&mut lights).join() {
                                     if let Light::Directional(ref mut d) = *light {
-                                        d.color = [0.0; 4].into();
+                                        d.color = Srgb::new(0.0, 0.0, 0.0);
                                     }
                                 }
                             } else {
                                 state.directional_light = true;
                                 for light in (&mut lights).join() {
                                     if let Light::Directional(ref mut d) = *light {
-                                        d.color = [0.2; 4].into();
+                                        d.color = Srgb::new(0.2, 0.2, 0.2);
                                     }
                                 }
                             }
@@ -146,13 +167,13 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
                     );
                 }
                 Some((VirtualKeyCode::P, ElementState::Pressed)) => {
-                    w.exec(|mut state: Write<DemoState>| {
+                    w.exec(|mut state: Write<'_, DemoState>| {
                         if state.point_light {
                             state.point_light = false;
-                            state.light_color = [0.0; 4].into();
+                            state.light_color = Srgb::new(0.0, 0.0, 0.0);
                         } else {
                             state.point_light = true;
-                            state.light_color = [1.0; 4].into();
+                            state.light_color = Srgb::new(1.0, 1.0, 1.0);
                         }
                     });
                 }
@@ -166,33 +187,46 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
 fn main() -> Result<(), Error> {
     amethyst::start_logger(Default::default());
 
-    let app_root = application_root_dir();
+    let app_root = application_root_dir()?;
 
     // Add our meshes directory to the asset loader.
-    let resources_directory = format!("{}/examples/assets/", app_root);
+    let assets_dir = app_root.join("examples").join("renderable").join("assets");
 
-    let display_config_path = format!(
-        "{}/examples/renderable/resources/display_config.ron",
-        app_root
-    );
+    let display_config_path = app_root
+        .join("examples")
+        .join("renderable")
+        .join("config")
+        .join("display.ron");
 
     let game_data = GameDataBuilder::default()
-        .with(PrefabLoaderSystem::<MyPrefabData>::default(), "", &[])
-        .with::<ExampleSystem>(ExampleSystem::default(), "example_system", &[])
+        .with_system_desc(PrefabLoaderSystemDesc::<MyPrefabData>::default(), "", &[])
+        .with_bundle(InputBundle::<StringBindings>::new())?
+        .with(
+            ExampleSystem::default(),
+            "example_system",
+            &["input_system"],
+        )
         .with_bundle(TransformBundle::new().with_dep(&["example_system"]))?
-        .with_bundle(UiBundle::<String, String>::new())?
+        .with_bundle(UiBundle::<StringBindings>::new())?
         .with_bundle(HotReloadBundle::default())?
-        .with_bundle(FPSCounterBundle::default())?
-        .with_basic_renderer(display_config_path, DrawShaded::<PosNormTex>::new(), true)?
-        .with_bundle(InputBundle::<String, String>::new())?;
-    let mut game = Application::build(resources_directory, Loading::default())?.build(game_data)?;
+        .with_bundle(FpsCounterBundle::default())?
+        .with_bundle(
+            RenderingBundle::<DefaultBackend>::new()
+                .with_plugin(
+                    RenderToWindow::from_config_path(display_config_path)?
+                        .with_clear([0.34, 0.36, 0.52, 1.0]),
+                )
+                .with_plugin(RenderShaded3D::default())
+                .with_plugin(RenderUi::default()),
+        )?;
+    let mut game = Application::build(assets_dir, Loading::default())?.build(game_data)?;
     game.run();
     Ok(())
 }
 
 struct DemoState {
     light_angle: f32,
-    light_color: [f32; 4],
+    light_color: Srgb,
     ambient_light: bool,
     point_light: bool,
     directional_light: bool,
@@ -203,7 +237,7 @@ impl Default for DemoState {
     fn default() -> Self {
         DemoState {
             light_angle: 0.0,
-            light_color: [1.0; 4],
+            light_color: Srgb::new(1.0, 1.0, 1.0),
             ambient_light: true,
             point_light: true,
             directional_light: true,
@@ -212,7 +246,7 @@ impl Default for DemoState {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, SystemDesc)]
 struct ExampleSystem {
     fps_display: Option<Entity>,
 }
@@ -225,7 +259,7 @@ impl<'a> System<'a> for ExampleSystem {
         WriteStorage<'a, Transform>,
         Write<'a, DemoState>,
         WriteStorage<'a, UiText>,
-        Read<'a, FPSCounter>,
+        Read<'a, FpsCounter>,
         UiFinder<'a>,
     );
 
@@ -241,14 +275,13 @@ impl<'a> System<'a> for ExampleSystem {
         state.light_angle += light_angular_velocity * time.delta_seconds();
         state.camera_angle += camera_angular_velocity * time.delta_seconds();
 
-        let delta_rot =
-            Quaternion::from_angle_z(Rad(camera_angular_velocity * time.delta_seconds()));
+        let delta_rot: UnitQuaternion<f32> = UnitQuaternion::from_axis_angle(
+            &Vector3::z_axis(),
+            camera_angular_velocity * time.delta_seconds(),
+        );
         for (_, transform) in (&camera, &mut transforms).join() {
-            // rotate the camera, using the origin as a pivot point
-            transform.translation = delta_rot.rotate_vector(transform.translation);
-            // add the delta rotation for the frame to the total rotation (quaternion multiplication
-            // is the same as rotational addition)
-            transform.rotation = (delta_rot * Quaternion::from(transform.rotation)).into();
+            // Append the delta rotation to the current transform.
+            *transform.isometry_mut() = delta_rot * transform.isometry();
         }
 
         for (point_light, transform) in
@@ -260,15 +293,18 @@ impl<'a> System<'a> for ExampleSystem {
                     } else {
                         None
                     }
-                }) {
-            transform.translation.x = light_orbit_radius * state.light_angle.cos();
-            transform.translation.y = light_orbit_radius * state.light_angle.sin();
-            transform.translation.z = light_z;
+                })
+        {
+            transform.set_translation_xyz(
+                light_orbit_radius * state.light_angle.cos(),
+                light_orbit_radius * state.light_angle.sin(),
+                light_z,
+            );
 
-            point_light.color = state.light_color.into();
+            point_light.color = state.light_color;
         }
 
-        if let None = self.fps_display {
+        if self.fps_display.is_none() {
             if let Some(fps_entity) = finder.find("fps_text") {
                 self.fps_display = Some(fps_entity);
             }

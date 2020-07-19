@@ -1,203 +1,165 @@
-use amethyst_assets::AssetStorage;
-use amethyst_audio::{output::Output, Source};
+use std::{collections::HashMap, fmt::Debug};
+
 use amethyst_core::{
+    ecs::{Entity, ReadExpect, System, SystemData, Write, WriteStorage},
     shrev::{EventChannel, ReaderId},
-    specs::{
-        Entity, Read, ReadExpect, ReadStorage, Resources, System, SystemData, Write, WriteStorage,
-    },
     ParentHierarchy,
 };
+use amethyst_derive::SystemDesc;
 
-use {OnUiActionImage, OnUiActionSound, UiButton, UiEvent, UiEventType::*, UiImage, UiText};
+use crate::{UiButtonAction, UiButtonActionType::*, UiImage, UiText};
+
+#[derive(Debug)]
+struct ActionChangeStack<T: Debug + Clone + PartialEq> {
+    initial_value: T,
+    stack: Vec<T>,
+}
+
+impl<T> ActionChangeStack<T>
+where
+    T: Debug + Clone + PartialEq,
+{
+    pub fn new(initial_value: T) -> Self {
+        ActionChangeStack {
+            initial_value,
+            stack: Vec::new(),
+        }
+    }
+
+    pub fn add(&mut self, change: T) {
+        self.stack.push(change);
+    }
+
+    pub fn remove(&mut self, change: &T) -> Option<T> {
+        if let Some(idx) = self.stack.iter().position(|it| it == change) {
+            Some(self.stack.remove(idx))
+        } else {
+            None
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stack.is_empty()
+    }
+
+    pub fn current(&self) -> T {
+        if self.stack.is_empty() {
+            self.initial_value.clone()
+        } else {
+            self.stack
+                .iter()
+                .last()
+                .map(T::clone)
+                .expect("Unreachable: Just checked that stack is not empty")
+        }
+    }
+}
 
 /// This system manages button mouse events.  It changes images and text colors, as well as playing audio
 /// when necessary.
 ///
 /// It's automatically registered with the `UiBundle`.
-#[derive(Default)]
+#[derive(Debug, SystemDesc)]
+#[system_desc(name(UiButtonSystemDesc))]
 pub struct UiButtonSystem {
-    event_reader: Option<ReaderId<UiEvent>>,
-    hovered: Option<Entity>,
+    #[system_desc(event_channel_reader)]
+    event_reader: ReaderId<UiButtonAction>,
+    #[system_desc(skip)]
+    set_images: HashMap<Entity, ActionChangeStack<UiImage>>,
+    #[system_desc(skip)]
+    set_text_colors: HashMap<Entity, ActionChangeStack<[f32; 4]>>,
 }
 
 impl UiButtonSystem {
     /// Creates a new instance of this structure
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(event_reader: ReaderId<UiButtonAction>) -> Self {
+        Self {
+            event_reader,
+            set_images: Default::default(),
+            set_text_colors: Default::default(),
+        }
     }
 }
 
 impl<'s> System<'s> for UiButtonSystem {
     type SystemData = (
-        ReadStorage<'s, UiButton>,
-        ReadStorage<'s, OnUiActionImage>,
-        ReadStorage<'s, OnUiActionSound>,
         WriteStorage<'s, UiImage>,
         WriteStorage<'s, UiText>,
-        Write<'s, EventChannel<UiEvent>>,
-        Read<'s, AssetStorage<Source>>,
-        Option<Read<'s, Output>>,
         ReadExpect<'s, ParentHierarchy>,
+        Write<'s, EventChannel<UiButtonAction>>,
     );
-
-    fn setup(&mut self, res: &mut Resources) {
-        Self::SystemData::setup(res);
-        self.event_reader = Some(res.fetch_mut::<EventChannel<UiEvent>>().register_reader());
-    }
 
     fn run(
         &mut self,
-        (
-            button_storage,
-            action_image,
-            action_sound,
-            mut image_storage,
-            mut text_storage,
-            events,
-            audio_storage,
-            audio_output,
-            hierarchy,
-        ): Self::SystemData,
+        (mut image_storage, mut text_storage, hierarchy, button_events): Self::SystemData,
     ) {
-        let event_reader = self.event_reader.as_mut().unwrap();
+        let event_reader = &mut self.event_reader;
 
-        for event in events.read(event_reader) {
-            let button = button_storage.get(event.target);
-            let action_image = action_image.get(event.target);
-            let action_sound = action_sound.get(event.target);
+        for event in button_events.read(event_reader) {
             match event.event_type {
-                ClickStart => {
-                    if let Some(action_image) = action_image {
-                        if let Some(press_image) = action_image.press_image.as_ref() {
-                            let _ = image_storage.insert(
-                                event.target,
-                                UiImage {
-                                    texture: press_image.clone(),
-                                },
-                            );
-                        } else {
-                            image_storage.remove(event.target);
-                        }
-                    }
-
+                SetTextColor(ref color) => {
                     for &child in hierarchy.children(event.target) {
                         if let Some(text) = text_storage.get_mut(child) {
-                            if let Some(new_color) = button.and_then(|b| b.press_text_color) {
-                                text.color = new_color;
-                            }
-                        }
-                    }
+                            // found the text. push its original color if
+                            // it's not there yet
+                            self.set_text_colors
+                                .entry(event.target)
+                                .or_insert_with(|| ActionChangeStack::new(text.color))
+                                .add(*color);
 
-                    if let Some(output) = audio_output.as_ref() {
-                        if let Some(sound) = action_sound
-                            .and_then(|s| s.press_sound.as_ref())
-                            .and_then(|s| audio_storage.get(s))
-                        {
-                            output.play_once(sound, 1.0);
+                            text.color = *color;
                         }
                     }
                 }
-                Click => {
-                    if let Some(output) = audio_output.as_ref() {
-                        if let Some(sound) = action_sound
-                            .and_then(|s| s.release_sound.as_ref())
-                            .and_then(|s| audio_storage.get(s))
-                        {
-                            output.play_once(sound, 1.0);
-                        }
-                    }
-                }
-                ClickStop => {
-                    if let Some(action_image) = action_image {
-                        if Some(event.target) == self.hovered {
-                            if let Some(hover_texture) = action_image.hover_image.as_ref() {
-                                let _ = image_storage.insert(
-                                    event.target,
-                                    UiImage {
-                                        texture: hover_texture.clone(),
-                                    },
-                                );
-                            } else {
-                                image_storage.remove(event.target);
+                UnsetTextColor(ref color) => {
+                    for &child in hierarchy.children(event.target) {
+                        if let Some(text) = text_storage.get_mut(child) {
+                            // first, remove the color we were told to unset
+                            if !self.set_text_colors.contains_key(&event.target) {
+                                // nothing to do!
+                                continue;
                             }
-                        } else {
-                            if let Some(normal_image) = action_image.normal_image.as_ref() {
-                                let _ = image_storage.insert(
-                                    event.target,
-                                    UiImage {
-                                        texture: normal_image.clone(),
-                                    },
-                                );
-                            } else {
-                                image_storage.remove(event.target);
-                            }
-                        }
-                    }
 
-                    if let Some(button) = button {
-                        for &child in hierarchy.children(event.target) {
-                            if let Some(text) = text_storage.get_mut(child) {
-                                if Some(event.target) == self.hovered {
-                                    if let Some(hover_color) = button.hover_text_color {
-                                        text.color = hover_color;
-                                    } else {
-                                        text.color = button.normal_text_color;
-                                    }
-                                } else {
-                                    text.color = button.normal_text_color;
-                                }
+                            self.set_text_colors
+                                .get_mut(&event.target)
+                                .and_then(|it| it.remove(color));
+
+                            text.color = self.set_text_colors[&event.target].current();
+
+                            if self.set_text_colors[&event.target].is_empty() {
+                                self.set_text_colors.remove(&event.target);
                             }
                         }
                     }
                 }
-                HoverStart => {
-                    self.hovered = Some(event.target);
-                    if let (Some(hover_sound), Some(audio_output)) = (
-                        action_sound
-                            .and_then(|s| s.hover_sound.as_ref())
-                            .and_then(|s| audio_storage.get(s)),
-                        audio_output.as_ref(),
-                    ) {
-                        audio_output.play_once(hover_sound, 1.0);
-                    }
+                SetImage(ref set_image) => {
                     if let Some(image) = image_storage.get_mut(event.target) {
-                        if let Some(texture) = action_image.and_then(|i| i.hover_image.as_ref()) {
-                            image.texture = texture.clone();
-                        }
+                        self.set_images
+                            .entry(event.target)
+                            .or_insert_with(|| ActionChangeStack::new(image.clone()))
+                            .add(set_image.clone());
+
+                        *image = set_image.clone();
                     }
-                    if let Some(button) = button {
-                        for &child in hierarchy.children(event.target) {
-                            if let Some(text) = text_storage.get_mut(child) {
-                                if let Some(new_color) = button.hover_text_color {
-                                    text.color = new_color;
-                                }
-                            }
+                }
+                UnsetTexture(ref unset_image) => {
+                    if let Some(image) = image_storage.get_mut(event.target) {
+                        if !self.set_images.contains_key(&event.target) {
+                            continue;
+                        }
+
+                        self.set_images
+                            .get_mut(&event.target)
+                            .and_then(|it| it.remove(unset_image));
+
+                        *image = self.set_images[&event.target].current();
+
+                        if self.set_images[&event.target].is_empty() {
+                            self.set_images.remove(&event.target);
                         }
                     }
                 }
-                HoverStop => {
-                    self.hovered = None;
-                    if let Some(action_image) = action_image {
-                        if let Some(normal_image) = action_image.normal_image.as_ref() {
-                            let _ = image_storage.insert(
-                                event.target,
-                                UiImage {
-                                    texture: normal_image.clone(),
-                                },
-                            );
-                        } else {
-                            image_storage.remove(event.target);
-                        }
-                    }
-                    if let Some(button) = button {
-                        for &child in hierarchy.children(event.target) {
-                            if let Some(text) = text_storage.get_mut(child) {
-                                text.color = button.normal_text_color;
-                            }
-                        }
-                    }
-                }
-            }
+            };
         }
     }
 }

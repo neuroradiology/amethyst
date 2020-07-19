@@ -1,35 +1,43 @@
 use amethyst_core::{
-    cgmath::SquareMatrix,
-    specs::prelude::{
-        BitSet, InsertedFlag, Join, ModifiedFlag, ReadStorage, ReaderId, Resources, System,
-        WriteStorage,
+    ecs::prelude::{
+        BitSet, ComponentEvent, Join, ReadStorage, ReaderId, System, SystemData, WriteStorage,
     },
-    GlobalTransform,
+    math::{convert, Matrix4},
+    Transform,
 };
-use amethyst_renderer::JointTransforms;
+use amethyst_derive::SystemDesc;
+use amethyst_rendy::skinning::JointTransforms;
+
+use log::error;
+
+#[cfg(feature = "profiler")]
+use thread_profiler::profile_scope;
 
 use super::resources::*;
 
 /// System for performing vertex skinning.
 ///
 /// Needs to run after global transforms have been updated for the current frame.
+#[derive(Debug, SystemDesc)]
+#[system_desc(name(VertexSkinningSystemDesc))]
 pub struct VertexSkinningSystem {
     /// Also scratch space, used while determining which skins need to be updated.
+    #[system_desc(skip)]
     updated: BitSet,
+    #[system_desc(skip)]
     updated_skins: BitSet,
     /// Used for tracking modifications to global transforms
-    updated_id: Option<ReaderId<ModifiedFlag>>,
-    inserted_id: Option<ReaderId<InsertedFlag>>,
+    #[system_desc(flagged_storage_reader(Transform))]
+    updated_id: ReaderId<ComponentEvent>,
 }
 
 impl VertexSkinningSystem {
     /// Creates a new `VertexSkinningSystem`
-    pub fn new() -> Self {
+    pub fn new(updated_id: ReaderId<ComponentEvent>) -> Self {
         Self {
-            updated: BitSet::new(),
-            updated_skins: BitSet::new(),
-            inserted_id: None,
-            updated_id: None,
+            updated: BitSet::default(),
+            updated_skins: BitSet::default(),
+            updated_id,
         }
     }
 }
@@ -37,29 +45,26 @@ impl VertexSkinningSystem {
 impl<'a> System<'a> for VertexSkinningSystem {
     type SystemData = (
         ReadStorage<'a, Joint>,
-        ReadStorage<'a, GlobalTransform>,
+        ReadStorage<'a, Transform>,
         WriteStorage<'a, Skin>,
         WriteStorage<'a, JointTransforms>,
     );
 
     fn run(&mut self, (joints, global_transforms, mut skins, mut matrices): Self::SystemData) {
+        #[cfg(feature = "profiler")]
+        profile_scope!("vertex_skinning_system");
+
         self.updated.clear();
 
-        global_transforms.populate_modified(
-            &mut self
-                .updated_id
-                .as_mut()
-                .expect("VertexSkinningSystem missing updated_id."),
-            &mut self.updated,
-        );
-
-        global_transforms.populate_inserted(
-            &mut self
-                .inserted_id
-                .as_mut()
-                .expect("VertexSkinningSystem missing inserted_id."),
-            &mut self.updated,
-        );
+        global_transforms
+            .channel()
+            .read(&mut self.updated_id)
+            .for_each(|event| match event {
+                ComponentEvent::Inserted(id) | ComponentEvent::Modified(id) => {
+                    self.updated.add(*id);
+                }
+                ComponentEvent::Removed(_id) => {}
+            });
 
         self.updated_skins.clear();
 
@@ -87,46 +92,45 @@ impl<'a> System<'a> for VertexSkinningSystem {
                             );
                             None
                         }
-                    }).flatten()
+                    })
+                    .flatten()
                     .map(|(global, inverse_bind_matrix)| {
-                        (global.0 * inverse_bind_matrix * bind_shape)
+                        global.global_matrix() * inverse_bind_matrix * bind_shape
                     }),
             );
 
             // update the joint matrices in all referenced mesh entities
             for (_, mesh_global, matrix) in (&skin.meshes, &global_transforms, &mut matrices).join()
             {
-                if let Some(global_inverse) = mesh_global.0.invert() {
+                if let Some(global_inverse) = mesh_global.global_matrix().try_inverse() {
                     matrix.matrices.clear();
                     matrix
                         .matrices
                         .extend(skin.joint_matrices.iter().map(|joint_matrix| {
-                            Into::<[[f32; 4]; 4]>::into(global_inverse * joint_matrix)
+                            convert::<_, Matrix4<f32>>(global_inverse * joint_matrix)
                         }));
                 }
             }
         }
 
-        for (_, mesh_global, mut joint_transform) in
+        for (_, mesh_global, joint_transform) in
             (&self.updated, &global_transforms, &mut matrices).join()
         {
-            if let Some(global_inverse) = mesh_global.0.invert() {
-                let skin = skins.get(joint_transform.skin).unwrap();
-                joint_transform.matrices.clear();
-                joint_transform
-                    .matrices
-                    .extend(skin.joint_matrices.iter().map(|joint_matrix| {
-                        Into::<[[f32; 4]; 4]>::into(global_inverse * joint_matrix)
-                    }));
+            if let Some(global_inverse) = mesh_global.global_matrix().try_inverse() {
+                if let Some(skin) = skins.get(joint_transform.skin) {
+                    joint_transform.matrices.clear();
+                    joint_transform
+                        .matrices
+                        .extend(skin.joint_matrices.iter().map(|joint_matrix| {
+                            convert::<_, Matrix4<f32>>(global_inverse * joint_matrix)
+                        }));
+                } else {
+                    error!(
+                        "Missing `Skin` Component for join transform entity {:?}",
+                        joint_transform.skin
+                    );
+                }
             }
         }
-    }
-
-    fn setup(&mut self, res: &mut Resources) {
-        use amethyst_core::specs::prelude::SystemData;
-        Self::SystemData::setup(res);
-        let mut transform = WriteStorage::<GlobalTransform>::fetch(res);
-        self.updated_id = Some(transform.track_modified());
-        self.inserted_id = Some(transform.track_inserted());
     }
 }

@@ -7,47 +7,67 @@ use std::{
     },
 };
 
+use derive_new::new;
 use rodio::SpatialSink;
 
+#[cfg(feature = "profiler")]
+use thread_profiler::profile_scope;
+
 use amethyst_core::{
-    cgmath::Transform,
-    specs::prelude::{Entities, Entity, Join, Read, ReadStorage, System, WriteStorage},
-    transform::GlobalTransform,
+    ecs::prelude::{
+        Entities, Entity, Join, Read, ReadStorage, System, SystemData, World, WriteStorage,
+    },
+    math::convert,
+    transform::Transform,
+    SystemDesc,
 };
 
-use {
+use crate::{
     components::{AudioEmitter, AudioListener},
     end_signal::EndSignalSource,
+    output::Output,
 };
 
-/// Syncs 3D transform data with the audio engine to provide 3D audio.
-#[derive(Default)]
-pub struct AudioSystem;
+/// Builds an `AudioSystem`.
+#[derive(Default, Debug, new)]
+pub struct AudioSystemDesc {
+    /// Audio `Output`.
+    pub output: Output,
+}
 
-impl AudioSystem {
-    /// Produces a new AudioSystem that uses the given listener.
-    pub fn new() -> AudioSystem {
-        Default::default()
+impl<'a, 'b> SystemDesc<'a, 'b, AudioSystem> for AudioSystemDesc {
+    fn build(self, world: &mut World) -> AudioSystem {
+        <AudioSystem as System<'_>>::SystemData::setup(world);
+
+        world.insert(self.output.clone());
+
+        AudioSystem::new(self.output)
     }
 }
+
+/// Syncs 3D transform data with the audio engine to provide 3D audio.
+#[derive(Debug, Default, new)]
+pub struct AudioSystem(Output);
 
 /// Add this structure to world as a resource with ID 0 to select an entity whose AudioListener
 /// component will be used.  If this resource isn't found then the system will arbitrarily select
 /// the first AudioListener it finds.
+#[derive(Debug)]
 pub struct SelectedListener(pub Entity);
 
 impl<'a> System<'a> for AudioSystem {
     type SystemData = (
+        Option<Read<'a, Output>>,
         Option<Read<'a, SelectedListener>>,
         Entities<'a>,
-        ReadStorage<'a, GlobalTransform>,
+        ReadStorage<'a, Transform>,
         ReadStorage<'a, AudioListener>,
         WriteStorage<'a, AudioEmitter>,
     );
 
     fn run(
         &mut self,
-        (select_listener, entities, transform, listener, mut audio_emitter): Self::SystemData,
+        (output, select_listener, entities, transform, listener, mut audio_emitter): Self::SystemData,
     ) {
         #[cfg(feature = "profiler")]
         profile_scope!("audio_system");
@@ -62,17 +82,28 @@ impl<'a> System<'a> for AudioSystem {
                 .and_then(|sl| transform.get(sl.0))
                 .or_else(|| transform.get(entity))
             {
-                let listener_transform = listener_transform.0;
-                let left_ear_position =
-                    listener_transform.transform_point(listener.left_ear).into();
-                let right_ear_position = listener_transform
-                    .transform_point(listener.right_ear)
-                    .into();
+                let listener_transform = listener_transform.global_matrix();
+                let left_ear_position: [f32; 3] = {
+                    let pos = listener_transform
+                        .transform_point(&listener.left_ear)
+                        .to_homogeneous()
+                        .xyz();
+                    [convert(pos.x), convert(pos.y), convert(pos.z)]
+                };
+                let right_ear_position: [f32; 3] = {
+                    let pos = listener_transform
+                        .transform_point(&listener.right_ear)
+                        .to_homogeneous()
+                        .xyz();
+                    [convert(pos.x), convert(pos.y), convert(pos.z)]
+                };
                 for (transform, mut audio_emitter) in (&transform, &mut audio_emitter).join() {
-                    let x = transform.0[3][0];
-                    let y = transform.0[3][1];
-                    let z = transform.0[3][2];
-                    let emitter_position = [x, y, z];
+                    let emitter_position: [f32; 3] = {
+                        let x = transform.global_matrix()[(0, 3)];
+                        let y = transform.global_matrix()[(1, 3)];
+                        let z = transform.global_matrix()[(2, 3)];
+                        [convert(x), convert(y), convert(z)]
+                    };
                     // Remove all sinks whose sounds have ended.
                     audio_emitter.sinks.retain(|s| !s.1.load(Ordering::Relaxed));
                     for &mut (ref mut sink, _) in &mut audio_emitter.sinks {
@@ -88,18 +119,20 @@ impl<'a> System<'a> for AudioSystem {
                         }
                     }
                     while let Some(source) = audio_emitter.sound_queue.pop() {
-                        let sink = SpatialSink::new(
-                            &listener.output.device,
-                            emitter_position,
-                            left_ear_position,
-                            right_ear_position,
-                        );
-                        let atomic_bool = Arc::new(AtomicBool::new(false));
-                        let clone = atomic_bool.clone();
-                        sink.append(EndSignalSource::new(source, move || {
-                            clone.store(true, Ordering::Relaxed);
-                        }));
-                        audio_emitter.sinks.push((sink, atomic_bool));
+                        if let Some(output) = &output {
+                            let sink = SpatialSink::new(
+                                &output.device,
+                                emitter_position,
+                                left_ear_position,
+                                right_ear_position,
+                            );
+                            let atomic_bool = Arc::new(AtomicBool::new(false));
+                            let clone = atomic_bool.clone();
+                            sink.append(EndSignalSource::new(source, move || {
+                                clone.store(true, Ordering::Relaxed);
+                            }));
+                            audio_emitter.sinks.push((sink, atomic_bool));
+                        }
                     }
                 }
             }

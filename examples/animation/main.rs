@@ -1,33 +1,36 @@
 //! Displays a shaded sphere to the user.
 
-extern crate amethyst;
-#[macro_use]
-extern crate serde;
-
 use amethyst::{
-    animation::{
-        get_animation_set, AnimationBundle, AnimationCommand, AnimationSet, AnimationSetPrefab,
-        DeferStartRelation, EndControl, StepDirection,
-    },
-    assets::{PrefabLoader, PrefabLoaderSystem, RonFormat},
+    animation::*,
+    assets::{Loader, PrefabLoader, PrefabLoaderSystemDesc, RonFormat},
     core::{Transform, TransformBundle},
-    ecs::prelude::Entity,
+    ecs::prelude::{Entity, World, WorldExt},
     input::{get_key, is_close_requested, is_key_down},
     prelude::*,
-    renderer::{DrawShaded, ElementState, PosNormTex, VirtualKeyCode},
+    renderer::{
+        plugins::{RenderPbr3D, RenderToWindow},
+        rendy::mesh::{Normal, Position, Tangent, TexCoord},
+        types::DefaultBackend,
+        RenderingBundle,
+    },
     utils::{application_root_dir, scene::BasicScenePrefab},
+    winit::{ElementState, VirtualKeyCode},
 };
+use serde::{Deserialize, Serialize};
 
 type MyPrefabData = (
-    Option<BasicScenePrefab<Vec<PosNormTex>>>,
+    Option<BasicScenePrefab<(Vec<Position>, Vec<Normal>, Vec<Tangent>, Vec<TexCoord>)>>,
     Option<AnimationSetPrefab<AnimationId, Transform>>,
 );
+
+const CLEAR_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 #[derive(Eq, PartialOrd, PartialEq, Hash, Debug, Copy, Clone, Deserialize, Serialize)]
 enum AnimationId {
     Scale,
     Rotate,
     Translate,
+    Test,
 }
 
 struct Example {
@@ -46,21 +49,58 @@ impl Default for Example {
     }
 }
 
-impl<'a, 'b> SimpleState<'a, 'b> for Example {
-    fn on_start(&mut self, data: StateData<GameData>) {
+impl SimpleState for Example {
+    fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
         let StateData { world, .. } = data;
         // Initialise the scene with an object, a light and a camera.
-        let prefab_handle = world.exec(|loader: PrefabLoader<MyPrefabData>| {
-            loader.load("prefab/animation.ron", RonFormat, (), ())
+        let prefab_handle = world.exec(|loader: PrefabLoader<'_, MyPrefabData>| {
+            loader.load("prefab/animation.ron", RonFormat, ())
         });
         self.sphere = Some(world.create_entity().with(prefab_handle).build());
+
+        let (animation_set, animation) = {
+            let loader = world.read_resource::<Loader>();
+
+            let sampler = loader.load_from_data(
+                Sampler {
+                    input: vec![0., 1.],
+                    output: vec![
+                        SamplerPrimitive::Vec3([0., 0., 0.]),
+                        SamplerPrimitive::Vec3([0., 1., 0.]),
+                    ],
+                    function: InterpolationFunction::Step,
+                },
+                (),
+                &world.read_resource(),
+            );
+
+            let animation = loader.load_from_data(
+                Animation::new_single(0, TransformChannel::Translation, sampler),
+                (),
+                &world.read_resource(),
+            );
+            let mut animation_set: AnimationSet<AnimationId, Transform> = AnimationSet::new();
+            animation_set.insert(AnimationId::Test, animation.clone());
+            (animation_set, animation)
+        };
+
+        let entity = world.create_entity().with(animation_set).build();
+        let mut storage = world.write_storage::<AnimationControlSet<AnimationId, Transform>>();
+        let control_set = get_animation_set(&mut storage, entity).unwrap();
+        control_set.add_animation(
+            AnimationId::Test,
+            &animation,
+            EndControl::Loop(None),
+            1.0,
+            AnimationCommand::Start,
+        );
     }
 
     fn handle_event(
         &mut self,
-        data: StateData<GameData>,
+        data: StateData<'_, GameData<'_, '_>>,
         event: StateEvent,
-    ) -> SimpleTrans<'a, 'b> {
+    ) -> SimpleTrans {
         let StateData { world, .. } = data;
         if let StateEvent::Window(event) = &event {
             if is_close_requested(&event) || is_key_down(&event, VirtualKeyCode::Escape) {
@@ -108,16 +148,18 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
                 Some((VirtualKeyCode::Left, ElementState::Pressed)) => {
                     get_animation_set::<AnimationId, Transform>(
                         &mut world.write_storage(),
-                        self.sphere.unwrap().clone(),
-                    ).unwrap()
+                        self.sphere.unwrap(),
+                    )
+                    .unwrap()
                     .step(self.current_animation, StepDirection::Backward);
                 }
 
                 Some((VirtualKeyCode::Right, ElementState::Pressed)) => {
                     get_animation_set::<AnimationId, Transform>(
                         &mut world.write_storage(),
-                        self.sphere.unwrap().clone(),
-                    ).unwrap()
+                        self.sphere.unwrap(),
+                    )
+                    .unwrap()
                     .step(self.current_animation, StepDirection::Forward);
                 }
 
@@ -125,8 +167,9 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
                     self.rate = 1.0;
                     get_animation_set::<AnimationId, Transform>(
                         &mut world.write_storage(),
-                        self.sphere.unwrap().clone(),
-                    ).unwrap()
+                        self.sphere.unwrap(),
+                    )
+                    .unwrap()
                     .set_rate(self.current_animation, self.rate);
                 }
 
@@ -134,8 +177,9 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
                     self.rate = 0.0;
                     get_animation_set::<AnimationId, Transform>(
                         &mut world.write_storage(),
-                        self.sphere.unwrap().clone(),
-                    ).unwrap()
+                        self.sphere.unwrap(),
+                    )
+                    .unwrap()
                     .set_rate(self.current_animation, self.rate);
                 }
 
@@ -143,8 +187,9 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
                     self.rate = 0.5;
                     get_animation_set::<AnimationId, Transform>(
                         &mut world.write_storage(),
-                        self.sphere.unwrap().clone(),
-                    ).unwrap()
+                        self.sphere.unwrap(),
+                    )
+                    .unwrap()
                     .set_rate(self.current_animation, self.rate);
                 }
 
@@ -168,25 +213,32 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
 }
 
 fn main() -> amethyst::Result<()> {
-    amethyst::start_logger(Default::default());
+    amethyst::Logger::from_config(amethyst::LoggerConfig {
+        level_filter: log::LevelFilter::Error,
+        ..Default::default()
+    })
+    .start();
 
-    let app_root = application_root_dir();
-
-    let display_config_path = format!(
-        "{}/examples/animation/resources/display_config.ron",
-        app_root
-    );
-
-    let resources = format!("{}/examples/assets/", app_root);
+    let app_root = application_root_dir()?;
+    let display_config_path = app_root.join("examples/animation/config/display.ron");
+    let assets_dir = app_root.join("examples/animation/assets/");
 
     let game_data = GameDataBuilder::default()
-        .with(PrefabLoaderSystem::<MyPrefabData>::default(), "", &[])
+        .with_system_desc(PrefabLoaderSystemDesc::<MyPrefabData>::default(), "", &[])
         .with_bundle(AnimationBundle::<AnimationId, Transform>::new(
             "animation_control_system",
             "sampler_interpolation_system",
-        ))?.with_bundle(TransformBundle::new().with_dep(&["sampler_interpolation_system"]))?
-        .with_basic_renderer(display_config_path, DrawShaded::<PosNormTex>::new(), false)?;
-    let mut game = Application::new(resources, Example::default(), game_data)?;
+        ))?
+        .with_bundle(TransformBundle::new().with_dep(&["sampler_interpolation_system"]))?
+        .with_bundle(
+            RenderingBundle::<DefaultBackend>::new()
+                .with_plugin(
+                    RenderToWindow::from_config_path(display_config_path)?.with_clear(CLEAR_COLOR),
+                )
+                .with_plugin(RenderPbr3D::default()),
+        )?;
+    let state: Example = Default::default();
+    let mut game = Application::new(assets_dir, state, game_data)?;
     game.run();
 
     Ok(())

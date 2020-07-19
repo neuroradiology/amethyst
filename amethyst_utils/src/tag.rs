@@ -2,10 +2,15 @@
 
 use std::marker::PhantomData;
 
-use amethyst_assets::{PrefabData, PrefabError};
-use amethyst_core::specs::prelude::{
-    Component, Entities, Entity, Join, NullStorage, ReadStorage, WriteStorage,
+use amethyst_assets::PrefabData;
+use amethyst_core::ecs::{
+    shred::{ResourceId, SystemData},
+    Component, Entities, Entity, Join, NullStorage, ReadStorage, World, WriteStorage,
 };
+use amethyst_derive::PrefabData;
+use amethyst_error::Error;
+
+use serde::{Deserialize, Serialize};
 
 /// Tag component that can be used with a custom type to tag entities for processing
 #[derive(Clone, Debug, Serialize, Deserialize, PrefabData)]
@@ -36,6 +41,7 @@ where
 
 /// Utility lookup for tag components
 #[derive(SystemData)]
+#[allow(missing_debug_implementations)]
 pub struct TagFinder<'a, T>
 where
     T: Clone + Send + Sync + 'static,

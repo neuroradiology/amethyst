@@ -1,11 +1,13 @@
 use minterpolate::InterpolationPrimitive;
+use serde::{Deserialize, Serialize};
 
 use amethyst_core::{
-    cgmath::{num_traits::NumCast, BaseNum},
-    specs::prelude::{Entity, WriteStorage},
+    alga::general::{SubsetOf, SupersetOf},
+    ecs::prelude::{Entity, WriteStorage},
+    math::{convert, RealField, Vector2, Vector3, Vector4},
 };
 
-use resources::{AnimationControlSet, AnimationSampling};
+use crate::resources::{AnimationControlSet, AnimationSampling};
 
 use self::SamplerPrimitive::*;
 
@@ -18,7 +20,7 @@ use self::SamplerPrimitive::*;
 ///        with the same id
 /// - `T`: the component type that the animation applies to
 pub fn get_animation_set<'a, I, T>(
-    controls: &'a mut WriteStorage<AnimationControlSet<I, T>>,
+    controls: &'a mut WriteStorage<'_, AnimationControlSet<I, T>>,
     entity: Entity,
 ) -> Option<&'a mut AnimationControlSet<I, T>>
 where
@@ -35,7 +37,7 @@ where
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SamplerPrimitive<S>
 where
-    S: BaseNum,
+    S: RealField + SubsetOf<f32> + SupersetOf<f32>,
 {
     /// A single value
     Scalar(S),
@@ -49,7 +51,7 @@ where
 
 impl<S> From<[S; 2]> for SamplerPrimitive<S>
 where
-    S: BaseNum,
+    S: RealField + SubsetOf<f32> + SupersetOf<f32>,
 {
     fn from(arr: [S; 2]) -> Self {
         SamplerPrimitive::Vec2(arr)
@@ -58,7 +60,7 @@ where
 
 impl<S> From<[S; 3]> for SamplerPrimitive<S>
 where
-    S: BaseNum,
+    S: RealField + SubsetOf<f32> + SupersetOf<f32>,
 {
     fn from(arr: [S; 3]) -> Self {
         SamplerPrimitive::Vec3(arr)
@@ -67,16 +69,43 @@ where
 
 impl<S> From<[S; 4]> for SamplerPrimitive<S>
 where
-    S: BaseNum,
+    S: RealField + SubsetOf<f32> + SupersetOf<f32>,
 {
     fn from(arr: [S; 4]) -> Self {
         SamplerPrimitive::Vec4(arr)
     }
 }
 
+impl<S> From<Vector2<S>> for SamplerPrimitive<S>
+where
+    S: RealField + SubsetOf<f32> + SupersetOf<f32>,
+{
+    fn from(arr: Vector2<S>) -> Self {
+        SamplerPrimitive::Vec2(arr.into())
+    }
+}
+
+impl<S> From<Vector3<S>> for SamplerPrimitive<S>
+where
+    S: RealField + SubsetOf<f32> + SupersetOf<f32>,
+{
+    fn from(arr: Vector3<S>) -> Self {
+        SamplerPrimitive::Vec3(arr.into())
+    }
+}
+
+impl<S> From<Vector4<S>> for SamplerPrimitive<S>
+where
+    S: RealField + SubsetOf<f32> + SupersetOf<f32>,
+{
+    fn from(arr: Vector4<S>) -> Self {
+        SamplerPrimitive::Vec4(arr.into())
+    }
+}
+
 impl<S> InterpolationPrimitive for SamplerPrimitive<S>
 where
-    S: BaseNum,
+    S: RealField + SubsetOf<f32> + SupersetOf<f32>,
 {
     fn add(&self, other: &Self) -> Self {
         match (*self, *other) {
@@ -121,17 +150,13 @@ where
     }
 
     fn dot(&self, other: &Self) -> f32 {
-        match (*self, *other) {
-            (Scalar(ref s), Scalar(ref o)) => (*s * *o).to_f32().unwrap(),
-            (Vec2(ref s), Vec2(ref o)) => (s[0] * o[0] + s[1] * o[1]).to_f32().unwrap(),
-            (Vec3(ref s), Vec3(ref o)) => {
-                (s[0] * o[0] + s[1] * o[1] + s[2] * o[2]).to_f32().unwrap()
-            }
-            (Vec4(ref s), Vec4(ref o)) => (s[0] * o[0] + s[1] * o[1] + s[2] * o[2] + s[3] * o[3])
-                .to_f32()
-                .unwrap(),
+        convert(match (*self, *other) {
+            (Scalar(s), Scalar(o)) => (s * o),
+            (Vec2(s), Vec2(o)) => (s[0] * o[0] + s[1] * o[1]),
+            (Vec3(s), Vec3(o)) => (s[0] * o[0] + s[1] * o[1] + s[2] * o[2]),
+            (Vec4(s), Vec4(o)) => (s[0] * o[0] + s[1] * o[1] + s[2] * o[2] + s[3] * o[3]),
             _ => panic!("Interpolation can not be done between primitives of different types"),
-        }
+        })
     }
 
     fn magnitude2(&self) -> f32 {
@@ -140,7 +165,7 @@ where
 
     fn magnitude(&self) -> f32 {
         match *self {
-            Scalar(ref s) => s.to_f32().unwrap(),
+            Scalar(s) => convert(s),
             Vec2(_) | Vec3(_) | Vec4(_) => self.magnitude2().sqrt(),
         }
     }
@@ -153,9 +178,6 @@ where
     }
 }
 
-fn mul_f32<T>(s: T, scalar: f32) -> T
-where
-    T: BaseNum,
-{
-    NumCast::from(s.to_f32().unwrap() * scalar).unwrap()
+fn mul_f32<T: RealField + SubsetOf<f32> + SupersetOf<f32>>(s: T, scalar: f32) -> T {
+    convert::<f32, T>(scalar) * s
 }

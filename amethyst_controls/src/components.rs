@@ -1,5 +1,8 @@
-use amethyst_assets::{PrefabData, PrefabError};
-use amethyst_core::specs::prelude::{Component, Entity, HashMapStorage, NullStorage, WriteStorage};
+use amethyst_assets::PrefabData;
+use amethyst_core::ecs::prelude::{Component, Entity, HashMapStorage, NullStorage, WriteStorage};
+use amethyst_error::Error;
+
+use serde::{Deserialize, Serialize};
 
 /// Add this to a camera if you want it to be a fly camera.
 /// You need to add the FlyControlBundle or the required systems for it to work.
@@ -29,7 +32,7 @@ impl Component for ArcBallControlTag {
 /// `PrefabData` for loading control tags on an `Entity`
 ///
 /// Will always load a `FlyControlTag`
-#[derive(Default, Clone, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct ControlTagPrefab {
     /// Place `ArcBallControlTag` on the `Entity`
     pub arc_ball: Option<(usize, f32)>,
@@ -47,7 +50,8 @@ impl<'a> PrefabData<'a> for ControlTagPrefab {
         entity: Entity,
         system_data: &mut Self::SystemData,
         entities: &[Entity],
-    ) -> Result<(), PrefabError> {
+        _: &[Entity],
+    ) -> Result<(), Error> {
         system_data.0.insert(entity, FlyControlTag)?;
         if let Some((index, distance)) = self.arc_ball {
             system_data.1.insert(

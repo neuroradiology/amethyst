@@ -2,57 +2,53 @@
 
 ## Testing a `Bundle`
 
-```rust
+```rust,edition2018
 # extern crate amethyst;
 # extern crate amethyst_test;
 #
 # use amethyst_test::prelude::*;
 # use amethyst::{
-#     core::bundle::{self, SystemBundle},
+#     core::bundle::SystemBundle,
+#     core::SystemDesc,
+#     derive::SystemDesc,
 #     ecs::prelude::*,
 #     prelude::*,
+#     Error,
 # };
 #
 # #[derive(Debug)]
 # struct ApplicationResource;
 #
-# #[derive(Debug)]
+# #[derive(Debug, SystemDesc)]
+# #[system_desc(insert(ApplicationResource))]
 # struct MySystem;
 #
 # impl<'s> System<'s> for MySystem {
 #     type SystemData = ReadExpect<'s, ApplicationResource>;
-# 
-#     fn run(&mut self, _: Self::SystemData) {}
 #
-#     fn setup(&mut self, res: &mut Resources) {
-#         Self::SystemData::setup(res);
-#         res.insert(ApplicationResource);
-#     }
+#     fn run(&mut self, _: Self::SystemData) {}
 # }
 #
 #[derive(Debug)]
 struct MyBundle;
 
 impl<'a, 'b> SystemBundle<'a, 'b> for MyBundle {
-    fn build(self, builder: &mut DispatcherBuilder<'a, 'b>) -> bundle::Result<()> {
+    fn build(self, world: &mut World, builder: &mut DispatcherBuilder<'a, 'b>) -> Result<(), Error> {
         // System that adds `ApplicationResource` to the `World`
-        builder.add(MySystem, "my_system", &[]);
+        builder.add(MySystem.build(world), "my_system", &[]);
         Ok(())
     }
 }
 
 // #[test]
-fn bundle_registers_system_with_resource() {
-    assert!(
-        AmethystApplication::blank()
-            .with_bundle(MyBundle)
-            .with_assertion(|world| {
-                // The next line would panic if the resource wasn't added.
-                world.read_resource::<ApplicationResource>();
-            })
-            .run()
-            .is_ok()
-    );
+fn bundle_registers_system_with_resource() -> Result<(), Error> {
+    AmethystApplication::blank()
+        .with_bundle(MyBundle)
+        .with_assertion(|world| {
+            // The next line would panic if the resource wasn't added.
+            world.read_resource::<ApplicationResource>();
+        })
+        .run()
 }
 #
 # fn main() {
@@ -62,14 +58,17 @@ fn bundle_registers_system_with_resource() {
 
 ## Testing a `System`
 
-```rust
+```rust,edition2018
 # extern crate amethyst;
 # extern crate amethyst_test;
 #
 # use amethyst_test::prelude::*;
 # use amethyst::{
+#     core::SystemDesc,
+#     derive::SystemDesc,
 #     ecs::prelude::*,
 #     prelude::*,
+#     Error,
 # };
 #
 struct MyComponent(pub i32);
@@ -78,7 +77,7 @@ impl Component for MyComponent {
     type Storage = DenseVecStorage<Self>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, SystemDesc)]
 struct MySystem;
 impl<'s> System<'s> for MySystem {
     type SystemData = WriteStorage<'s, MyComponent>;
@@ -90,28 +89,25 @@ impl<'s> System<'s> for MySystem {
 }
 
 // #[test]
-fn system_increases_component_value_by_one() {
-    assert!(
-        AmethystApplication::blank()
-            .with_system(MySystem, "my_system", &[])
-            .with_effect(|world| {
-                let entity = world.create_entity().with(MyComponent(0)).build();
-                world.add_resource(EffectReturn(entity));
-            })
-            .with_assertion(|world| {
-                let entity = world.read_resource::<EffectReturn<Entity>>().0.clone();
+fn system_increases_component_value_by_one() -> Result<(), Error> {
+    AmethystApplication::blank()
+        .with_system(MySystem, "my_system", &[])
+        .with_effect(|world| {
+            let entity = world.create_entity().with(MyComponent(0)).build();
+            world.insert(EffectReturn(entity));
+        })
+        .with_assertion(|world| {
+            let entity = world.read_resource::<EffectReturn<Entity>>().0.clone();
 
-                let my_component_storage = world.read_storage::<MyComponent>();
-                let my_component = my_component_storage
-                    .get(entity)
-                    .expect("Entity should have a `MyComponent` component.");
+            let my_component_storage = world.read_storage::<MyComponent>();
+            let my_component = my_component_storage
+                .get(entity)
+                .expect("Entity should have a `MyComponent` component.");
 
-                // If the system ran, the value in the `MyComponent` should be 1.
-                assert_eq!(1, my_component.0);
-            })
-            .run()
-            .is_ok()
-    );
+            // If the system ran, the value in the `MyComponent` should be 1.
+            assert_eq!(1, my_component.0);
+        })
+        .run()
 }
 #
 # fn main() {
@@ -123,20 +119,23 @@ fn system_increases_component_value_by_one() {
 
 This is useful when your system must run *after* some setup has been done, for example adding a resource:
 
-```rust
+```rust,edition2018
 # extern crate amethyst;
 # extern crate amethyst_test;
 #
 # use amethyst_test::prelude::*;
 # use amethyst::{
+#     core::SystemDesc,
+#     derive::SystemDesc,
 #     ecs::prelude::*,
 #     prelude::*,
+#     Error,
 # };
 #
 // !Default
 struct MyResource(pub i32);
 
-#[derive(Debug)]
+#[derive(Debug, SystemDesc)]
 struct MySystem;
 
 impl<'s> System<'s> for MySystem {
@@ -148,22 +147,19 @@ impl<'s> System<'s> for MySystem {
 }
 
 // #[test]
-fn system_increases_resource_value_by_one() {
-    assert!(
-        AmethystApplication::blank()
-            .with_setup(|world| {
-                world.add_resource(MyResource(0));
-            })
-            .with_system_single(MySystem, "my_system", &[])
-            .with_assertion(|world| {
-                let my_resource = world.read_resource::<MyResource>();
+fn system_increases_resource_value_by_one() -> Result<(), Error> {
+    AmethystApplication::blank()
+        .with_setup(|world| {
+            world.insert(MyResource(0));
+        })
+        .with_system_single(MySystem, "my_system", &[])
+        .with_assertion(|world| {
+            let my_resource = world.read_resource::<MyResource>();
 
-                // If the system ran, the value in the `MyResource` should be 1.
-                assert_eq!(1, my_resource.0);
-            })
-            .run()
-            .is_ok()
-    );
+            // If the system ran, the value in the `MyResource` should be 1.
+            assert_eq!(1, my_resource.0);
+        })
+        .run()
 }
 #
 # fn main() {

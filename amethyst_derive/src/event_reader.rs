@@ -1,5 +1,8 @@
-use proc_macro2::TokenStream;
-use syn::{Data, DeriveInput, Ident, Meta, NestedMeta, Type};
+//! EventReader Implementation
+
+use proc_macro2::{Literal, Span, TokenStream};
+use quote::quote;
+use syn::{Data, DeriveInput, GenericParam, Ident, Lifetime, LifetimeDef, Meta, NestedMeta, Type};
 
 pub fn impl_event_reader(ast: &DeriveInput) -> TokenStream {
     let event_name = &ast.ident;
@@ -10,26 +13,29 @@ pub fn impl_event_reader(ast: &DeriveInput) -> TokenStream {
         .iter()
         .filter(|attr| attr.path.segments[0].ident == "reader")
         .map(|attr| {
-            attr.interpret_meta()
+            attr.parse_meta()
                 .expect("reader attribute incorrectly defined")
-        }) {
-        match meta {
-            Meta::List(l) => {
-                for nested_meta in l.nested.iter() {
-                    match *nested_meta {
-                        NestedMeta::Meta(Meta::Word(ref word)) => {
-                            reader_name = Some(word.clone());
+        })
+    {
+        if let Meta::List(l) = meta {
+            for nested_meta in l.nested.iter() {
+                match nested_meta {
+                    NestedMeta::Meta(Meta::Path(path)) => {
+                        if let Some(ident) = path.get_ident() {
+                            reader_name = Some(ident.clone());
+                        } else {
+                            panic!("reader attribute does not contain a single name");
                         }
-                        _ => panic!("reader attribute does not contain a single name"),
                     }
+                    _ => panic!("reader attribute does not contain a single name"),
                 }
             }
-            _ => (),
         };
     }
 
-    let reader_name = reader_name.expect(&format!(
-        r#"
+    let reader_name = reader_name.unwrap_or_else(|| {
+        panic!(
+            r#"
 #[derive(EventReader)] requested for {}, but #[reader(SomeEventReader)] attribute is missing
 
 Example usage:
@@ -40,46 +46,77 @@ pub enum SomeEvent {{
     Two(Event2),
 }}
 "#,
-        event_name
-    ));
+            event_name
+        )
+    });
 
     let tys = collect_field_types(&ast.data);
     let tys = &tys;
     let names = collect_variant_names(&ast.data);
     let names = &names;
+    let type_params_with_defaults = ast.generics.type_params();
+    let (_, type_generics, where_clause) = ast.generics.split_for_impl();
+    let mut generics = ast.generics.clone();
 
-    let reads : Vec<_> = (0..tys.len()).map(|n| {
-        let variant = &names[n];
-        quote! {
-            events.extend(data.#n.read(self.#n.as_mut().expect("ReaderId undefined, has setup been run?")).cloned().map(|e| #event_name::#variant(e)));
-        }
-    }).collect();
+    let reader_lifetime = Lifetime::new("'r", Span::call_site());
+    // Need to wrap the lifetime in an iterator because the event channel resources are tokenized in
+    // a cycle.
+    let reader_lifetime_iter = std::iter::repeat(reader_lifetime.clone()).take(tys.len());
+    generics
+        .params
+        .push(GenericParam::Lifetime(LifetimeDef::new(
+            reader_lifetime.clone(),
+        )));
+
+    let (impl_generics, _, _) = generics.split_for_impl();
+
+    let reads: Vec<_> = (0..tys.len())
+        .map(|n| {
+            let variant = &names[n];
+            let tuple_index = Literal::usize_unsuffixed(n);
+            quote! {
+                events.extend(
+                    data.#tuple_index.read(
+                        self.#tuple_index
+                            .as_mut()
+                            .expect("ReaderId undefined, has setup been run?")
+                        )
+                    .cloned()
+                    .map(#event_name::#variant)
+                );
+            }
+        })
+        .collect();
     let setups: Vec<_> = (0..tys.len())
         .map(|n| {
             let ty = &tys[n];
+            let tuple_index = Literal::usize_unsuffixed(n);
             quote! {
-                self.#n = Some(res.fetch_mut::<EventChannel<#ty>>().register_reader());
+                self.#tuple_index = Some(world.fetch_mut::<EventChannel<#ty>>().register_reader());
             }
-        }).collect();
+        })
+        .collect();
     quote! {
         #[allow(missing_docs)]
         #[derive(Default)]
-        pub struct #reader_name(
+        pub struct #reader_name <#(#type_params_with_defaults),*> (
             #(Option<ReaderId<#tys>>, )*
-        );
+        ) #where_clause;
 
-        impl<'a> EventReader<'a> for #reader_name {
+        impl #impl_generics EventReader<#reader_lifetime> for #reader_name #type_generics
+        #where_clause
+        {
             type SystemData = (
-                #(Read<'a, EventChannel<#tys>>),*
+                #(Read<#reader_lifetime_iter, EventChannel<#tys>>),*
             );
-            type Event = #event_name;
+            type Event = #event_name #type_generics;
 
-            fn read(&mut self, data: Self::SystemData, events: &mut Vec<#event_name>) {
+            fn read(&mut self, data: Self::SystemData, events: &mut Vec<#event_name #type_generics>) {
                 #(#reads)*
             }
 
-            fn setup(&mut self, res: &mut Resources) {
-                <Self::SystemData as SystemData<'a>>::setup(res);
+            fn setup(&mut self, world: &mut World) {
+                <Self::SystemData as SystemData<#reader_lifetime>>::setup(world);
                 #(#setups)*
             }
         }
@@ -100,7 +137,8 @@ fn collect_field_types(ast: &Data) -> Vec<Type> {
                 .expect("Event enum variant does not contain an inner event type")
                 .ty
                 .clone()
-        }).collect()
+        })
+        .collect()
 }
 
 fn collect_variant_names(ast: &Data) -> Vec<Ident> {

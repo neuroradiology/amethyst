@@ -2,28 +2,20 @@
 
 #![allow(unused)]
 
-extern crate amethyst_assets;
-extern crate amethyst_core;
-extern crate rayon;
-extern crate ron;
-#[macro_use]
-extern crate serde;
-
 use std::sync::Arc;
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use serde::{Deserialize, Serialize};
 
 use amethyst_assets::*;
 use amethyst_core::{
-    specs::{
-        common::Errors,
-        prelude::{
-            Builder, Dispatcher, DispatcherBuilder, Read, ReadExpect, System, VecStorage, World,
-            Write,
-        },
+    ecs::prelude::{
+        Builder, Dispatcher, DispatcherBuilder, Read, ReadExpect, System, VecStorage, World,
+        WorldExt, Write,
     },
     Time,
 };
+use amethyst_error::{format_err, Error, ResultExt};
 
 struct App {
     dispatcher: Dispatcher<'static, 'static>,
@@ -40,12 +32,11 @@ impl App {
 
         world.register::<MeshHandle>();
 
-        world.add_resource(Errors::new());
-        world.add_resource(AssetStorage::<MeshAsset>::new());
-        world.add_resource(Loader::new(path, pool.clone()));
-        world.add_resource(Time::default());
-        world.add_resource(pool);
-        world.add_resource(Time::default());
+        world.insert(AssetStorage::<MeshAsset>::new());
+        world.insert(Loader::new(path, pool.clone()));
+        world.insert(Time::default());
+        world.insert(pool);
+        world.insert(Time::default());
 
         App {
             dispatcher,
@@ -55,10 +46,8 @@ impl App {
     }
 
     fn update(&mut self) {
-        self.dispatcher.dispatch(&mut self.world.res);
+        self.dispatcher.dispatch(&self.world);
         self.world.maintain();
-        let mut errors = self.world.write_resource::<Errors>();
-        errors.print_and_exit();
     }
 
     fn run(&mut self) {
@@ -87,21 +76,21 @@ impl Asset for MeshAsset {
 }
 
 /// A format the mesh data could be stored with.
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Ron;
 
-impl SimpleFormat<MeshAsset> for Ron {
-    const NAME: &'static str = "RON";
+impl Format<VertexData> for Ron {
+    fn name(&self) -> &'static str {
+        "RON"
+    }
 
-    type Options = ();
-
-    fn import(&self, bytes: Vec<u8>, _: ()) -> Result<VertexData> {
+    fn import_simple(&self, bytes: Vec<u8>) -> Result<VertexData, Error> {
         use ron::de::from_str;
         use std::str::from_utf8;
 
         let s = from_utf8(&bytes)?;
 
-        from_str(s).chain_err(|| "Failed to decode mesh file")
+        from_str(s).with_context(|_| format_err!("Failed to decode mesh file"))
     }
 }
 
@@ -148,7 +137,8 @@ impl State {
                 let (mesh, progress) = {
                     let mut progress = ProgressCounter::new();
                     let loader = world.read_resource::<Loader>();
-                    let a = loader.load("mesh.ron", Ron, (), &mut progress, &world.read_resource());
+                    let a: MeshHandle =
+                        loader.load("mesh.ron", Ron, &mut progress, &world.read_resource());
 
                     (a, progress)
                 };
@@ -164,7 +154,7 @@ impl State {
                     eprintln!("-- Errors --");
                     progress.errors().iter().enumerate().for_each(|(n, e)| {
                         eprintln!("{}: error: {}", n, e.error);
-                        for cause in e.error.iter().skip(1) {
+                        for cause in e.error.causes().skip(1) {
                             eprintln!("{}: caused by: {}", n, cause);
                         }
                     });

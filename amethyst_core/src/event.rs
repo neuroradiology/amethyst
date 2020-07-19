@@ -1,4 +1,4 @@
-use specs::{Resources, SystemData, World};
+use crate::ecs::{SystemData, World};
 
 /// Read events generically
 pub trait EventReader<'a> {
@@ -16,15 +16,17 @@ pub trait EventReader<'a> {
     }
 
     /// Setup event reader
-    fn setup(&mut self, res: &mut Resources) {
+    fn setup(&mut self, res: &mut World) {
         Self::SystemData::setup(res);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use shrev::{EventChannel, ReaderId};
-    use specs::Read;
+    use crate::{
+        ecs::Read,
+        shrev::{EventChannel, ReaderId},
+    };
 
     use super::*;
 
@@ -68,7 +70,7 @@ mod tests {
 
     impl From<TestEvent> for AggregateEvent {
         fn from(event: TestEvent) -> Self {
-            AggregateEvent::Test(event.clone())
+            AggregateEvent::Test(event)
         }
     }
 

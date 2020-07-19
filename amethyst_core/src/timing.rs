@@ -17,8 +17,6 @@ pub struct Time {
     fixed_seconds: f32,
     /// Rate at which `State::fixed_update` is called.
     fixed_time: Duration,
-    /// Time at which `State::fixed_update` was last called.
-    pub last_fixed_update: Instant,
     /// The total number of frames that have been played in this session.
     frame_number: u64,
     ///Time elapsed since game start, ignoring the speed multipler.
@@ -27,20 +25,30 @@ pub struct Time {
     absolute_time: Duration,
     ///Time multiplier. Affects returned delta_seconds, delta_time and absolute_time.
     time_scale: f32,
+    /// Fixed timestep accumulator.
+    fixed_time_accumulator: f32,
+    /// Fixed update interpolation alpha
+    interpolation_alpha: f32,
 }
 
 impl Time {
     /// Gets the time difference between frames in seconds.
+    ///
+    /// This function should not be used during `fixed_update`s, use `fixed_seconds` instead.
     pub fn delta_seconds(&self) -> f32 {
         self.delta_seconds
     }
 
     /// Gets the time difference between frames.
+    ///
+    /// This function should not be used during `fixed_update`s, use `fixed_time` instead.
     pub fn delta_time(&self) -> Duration {
         self.delta_time
     }
 
     /// Gets the time difference between frames in seconds ignoring the time speed multiplier.
+    ///
+    /// This function should not be used during `fixed_update`s.
     pub fn delta_real_seconds(&self) -> f32 {
         self.delta_real_seconds
     }
@@ -63,11 +71,6 @@ impl Time {
     /// Gets the current frame number.  This increments by 1 every frame.  There is no frame 0.
     pub fn frame_number(&self) -> u64 {
         self.frame_number
-    }
-
-    /// Gets the time at which the last fixed update was called.
-    pub fn last_fixed_update(&self) -> Instant {
-        self.last_fixed_update
     }
 
     /// Gets the time since the start of the game, taking into account the speed multiplier.
@@ -95,7 +98,11 @@ impl Time {
         self.time_scale
     }
 
-    /// Gets the total number of frames that have been played in this session.
+    /// Gets the current interpolation alpha factor.
+    pub fn interpolation_alpha(&self) -> f32 {
+        self.interpolation_alpha
+    }
+
     /// Sets both `delta_seconds` and `delta_time` based on the seconds given.
     ///
     /// This should only be called by the engine.  Bad things might happen if you call this in
@@ -156,12 +163,34 @@ impl Time {
         self.time_scale = multiplier;
     }
 
-    /// Indicates a fixed update just finished.
+    /// Restarts the internal fixed update accumulator to the desired fixed update delta time.
+    ///
+    /// This should only be called by the engine.  Bad things might happen if you call this in
+    /// your game.
+    pub fn start_fixed_update(&mut self) {
+        self.fixed_time_accumulator += self.delta_real_seconds;
+    }
+
+    /// Checks to see if we should perform another fixed update iteration, and if so, returns true
+    /// and reduces the accumulator.
+    ///
+    /// This should only be called by the engine.  Bad things might happen if you call this in
+    /// your game.
+    pub fn step_fixed_update(&mut self) -> bool {
+        if self.fixed_time_accumulator >= self.fixed_seconds {
+            self.fixed_time_accumulator -= self.fixed_seconds;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Updates the interpolation alpha factor given the current fixed update rate and accumulator.
     ///
     /// This should only be called by the engine.  Bad things might happen if you call this in
     /// your game.
     pub fn finish_fixed_update(&mut self) {
-        self.last_fixed_update += self.fixed_time
+        self.interpolation_alpha = self.fixed_time_accumulator / self.fixed_seconds;
     }
 }
 
@@ -174,8 +203,9 @@ impl Default for Time {
             delta_real_time: Duration::from_secs(0),
             fixed_seconds: duration_to_secs(Duration::new(0, 16_666_666)),
             fixed_time: Duration::new(0, 16_666_666),
-            last_fixed_update: Instant::now(),
+            fixed_time_accumulator: 0.0,
             frame_number: 0,
+            interpolation_alpha: 0.0,
             absolute_real_time: Duration::default(),
             absolute_time: Duration::default(),
             time_scale: 1.0,
@@ -349,6 +379,58 @@ mod tests {
             UNCERTAINTY,
             elapsed
         );
+    }
+
+    // Test that fixed_update methods accumulate and return correctly
+    // Test confirms that with a fixed update of 120fps, we run fixed update twice with the timer
+    // Runs at 10 times game speed, which shouldn't affect fixed updates
+    #[test]
+    fn fixed_update_120fps() {
+        use super::Time;
+
+        let mut time = Time::default();
+        time.set_fixed_seconds(1.0 / 120.0);
+        time.set_time_scale(10.0);
+
+        let step = 1.0 / 60.0;
+        let mut fixed_count = 0;
+        for _ in 0..60 {
+            time.set_delta_seconds(step);
+            time.start_fixed_update();
+
+            while time.step_fixed_update() {
+                fixed_count += 1;
+            }
+
+            time.finish_fixed_update();
+        }
+
+        assert_eq!(fixed_count, 120);
+    }
+
+    // Test that fixed_update methods accumulate and return correctly
+    // Test confirms that with a fixed update every 1 second, it runs every 1 second only
+    #[test]
+    fn fixed_update_1sec() {
+        use super::Time;
+
+        let mut time = Time::default();
+        time.set_fixed_seconds(1.0);
+
+        let step = 1.0 / 60.0;
+        let mut fixed_count = 0;
+        for _ in 0..130 {
+            // Run two seconds
+            time.set_delta_seconds(step);
+            time.start_fixed_update();
+
+            while time.step_fixed_update() {
+                fixed_count += 1;
+            }
+
+            time.finish_fixed_update();
+        }
+        assert_eq!(fixed_count, 2);
     }
 }
 

@@ -1,40 +1,32 @@
+pub use self::{
+    actions::{UiButtonAction, UiButtonActionType},
+    builder::{UiButtonBuilder, UiButtonBuilderResources},
+    retrigger::{
+        UiButtonActionRetrigger, UiButtonActionRetriggerSystem, UiButtonActionRetriggerSystemDesc,
+    },
+    system::{UiButtonSystem, UiButtonSystemDesc},
+};
+use crate::{define_widget, Interactable, UiSoundRetrigger, UiText, UiTransform};
+use amethyst_assets::Handle;
+use amethyst_core::Parent;
+use amethyst_rendy::Texture;
+
+mod actions;
 mod builder;
+mod retrigger;
 mod system;
 
-pub use self::builder::{UiButtonBuilder, UiButtonBuilderResources};
-pub use self::system::UiButtonSystem;
-///! A clickable button.
-use amethyst_core::specs::prelude::{Component, DenseVecStorage};
+define_widget!(UiButton =>
+    entities: [text_entity, image_entity]
+    components: [
+        (has UiTransform as position on image_entity),
+        (has UiTransform as text_position on text_entity),
+        (has Handle<Texture> as texture on image_entity),
+        (has Interactable as mouse_reactive on image_entity),
+        (has UiText as text on text_entity),
 
-/// A clickable button, this must be paired with a `UiImage`
-/// and this entity must have a child entity with a `UiText`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct UiButton {
-    /// Default text color
-    normal_text_color: [f32; 4],
-    /// Text color used when this button is hovered over
-    hover_text_color: Option<[f32; 4]>,
-    /// Text color used when this button is pressed
-    press_text_color: Option<[f32; 4]>,
-}
-
-impl UiButton {
-    /// A constructor for this component.  It's recommended to use
-    /// either a prefab or `UiButtonBuilder` rather than this function
-    /// if possible.
-    pub fn new(
-        normal_text_color: [f32; 4],
-        hover_text_color: Option<[f32; 4]>,
-        press_text_color: Option<[f32; 4]>,
-    ) -> Self {
-        Self {
-            normal_text_color,
-            hover_text_color,
-            press_text_color,
-        }
-    }
-}
-
-impl Component for UiButton {
-    type Storage = DenseVecStorage<Self>;
-}
+        (maybe_has Parent as parent on image_entity),
+        (maybe_has UiButtonActionRetrigger as action_retrigger on image_entity),
+        (maybe_has UiSoundRetrigger as sound_retrigger on image_entity)
+    ]
+);

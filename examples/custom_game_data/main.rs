@@ -1,38 +1,42 @@
 //! Demonstrates how to use a custom game data structure
 
-extern crate amethyst;
-extern crate rayon;
-
+use crate::{
+    example_system::ExampleSystem,
+    game_data::{CustomGameData, CustomGameDataBuilder},
+};
 use amethyst::{
     assets::{
-        Completion, Handle, Prefab, PrefabLoader, PrefabLoaderSystem, ProgressCounter, RonFormat,
+        Completion, Handle, Prefab, PrefabLoader, PrefabLoaderSystemDesc, ProgressCounter,
+        RonFormat,
     },
-    config::Config,
     core::transform::TransformBundle,
     ecs::{
         prelude::{Component, Entity},
-        storage::NullStorage,
+        NullStorage, WorldExt,
     },
-    input::{is_close_requested, is_key_down, InputBundle},
+    input::{is_close_requested, is_key_down, InputBundle, StringBindings},
     prelude::*,
     renderer::{
-        DisplayConfig, DrawShaded, Pipeline, PosNormTex, RenderBundle, Stage, VirtualKeyCode,
+        palette::Srgb,
+        plugins::{RenderShaded3D, RenderToWindow},
+        rendy::mesh::{Normal, Position, TexCoord},
+        types::DefaultBackend,
+        RenderingBundle,
     },
-    ui::{DrawUi, UiBundle, UiCreator, UiLoader, UiPrefab},
-    utils::{application_root_dir, fps_counter::FPSCounterBundle, scene::BasicScenePrefab},
+    ui::{RenderUi, UiBundle, UiCreator, UiLoader, UiPrefab},
+    utils::{application_root_dir, fps_counter::FpsCounterBundle, scene::BasicScenePrefab},
+    winit::VirtualKeyCode,
     Error,
 };
-use example_system::ExampleSystem;
-use game_data::{CustomGameData, CustomGameDataBuilder};
 
 mod example_system;
 mod game_data;
 
-type MyPrefabData = BasicScenePrefab<Vec<PosNormTex>>;
+type MyPrefabData = BasicScenePrefab<(Vec<Position>, Vec<Normal>, Vec<TexCoord>)>;
 
 pub struct DemoState {
     light_angle: f32,
-    light_color: [f32; 4],
+    light_color: Srgb,
     camera_angle: f32,
 }
 
@@ -59,29 +63,29 @@ impl Component for Tag {
 }
 
 impl<'a, 'b> State<CustomGameData<'a, 'b>, StateEvent> for Loading {
-    fn on_start(&mut self, data: StateData<CustomGameData>) {
-        self.scene = Some(data.world.exec(|loader: PrefabLoader<MyPrefabData>| {
-            loader.load("prefab/renderable.ron", RonFormat, (), &mut self.progress)
+    fn on_start(&mut self, data: StateData<'_, CustomGameData<'_, '_>>) {
+        self.scene = Some(data.world.exec(|loader: PrefabLoader<'_, MyPrefabData>| {
+            loader.load("prefab/renderable.ron", RonFormat, &mut self.progress)
         }));
 
-        self.load_ui = Some(data.world.exec(|mut creator: UiCreator| {
+        self.load_ui = Some(data.world.exec(|mut creator: UiCreator<'_>| {
             creator.create("ui/fps.ron", &mut self.progress);
             creator.create("ui/loading.ron", &mut self.progress)
         }));
         self.paused_ui = Some(
             data.world
-                .exec(|loader: UiLoader| loader.load("ui/paused.ron", &mut self.progress)),
+                .exec(|loader: UiLoader<'_>| loader.load("ui/paused.ron", &mut self.progress)),
         );
-        data.world.add_resource::<DemoState>(DemoState {
+        data.world.insert::<DemoState>(DemoState {
             light_angle: 0.0,
-            light_color: [1.0; 4],
+            light_color: Srgb::new(1.0, 1.0, 1.0),
             camera_angle: 0.0,
         });
     }
 
     fn handle_event(
         &mut self,
-        _: StateData<CustomGameData>,
+        _: StateData<'_, CustomGameData<'_, '_>>,
         event: StateEvent,
     ) -> Trans<CustomGameData<'a, 'b>, StateEvent> {
         if let StateEvent::Window(event) = event {
@@ -94,7 +98,7 @@ impl<'a, 'b> State<CustomGameData<'a, 'b>, StateEvent> for Loading {
 
     fn update(
         &mut self,
-        data: StateData<CustomGameData>,
+        data: StateData<'_, CustomGameData<'_, '_>>,
     ) -> Trans<CustomGameData<'a, 'b>, StateEvent> {
         data.data.update(&data.world, true);
         match self.progress.complete() {
@@ -120,7 +124,7 @@ impl<'a, 'b> State<CustomGameData<'a, 'b>, StateEvent> for Loading {
 impl<'a, 'b> State<CustomGameData<'a, 'b>, StateEvent> for Paused {
     fn handle_event(
         &mut self,
-        data: StateData<CustomGameData>,
+        data: StateData<'_, CustomGameData<'_, '_>>,
         event: StateEvent,
     ) -> Trans<CustomGameData<'a, 'b>, StateEvent> {
         if let StateEvent::Window(event) = &event {
@@ -139,7 +143,7 @@ impl<'a, 'b> State<CustomGameData<'a, 'b>, StateEvent> for Paused {
 
     fn update(
         &mut self,
-        data: StateData<CustomGameData>,
+        data: StateData<'_, CustomGameData<'_, '_>>,
     ) -> Trans<CustomGameData<'a, 'b>, StateEvent> {
         data.data.update(&data.world, false);
         Trans::None
@@ -147,13 +151,13 @@ impl<'a, 'b> State<CustomGameData<'a, 'b>, StateEvent> for Paused {
 }
 
 impl<'a, 'b> State<CustomGameData<'a, 'b>, StateEvent> for Main {
-    fn on_start(&mut self, data: StateData<CustomGameData>) {
+    fn on_start(&mut self, data: StateData<'_, CustomGameData<'_, '_>>) {
         data.world.create_entity().with(self.scene.clone()).build();
     }
 
     fn handle_event(
         &mut self,
-        data: StateData<CustomGameData>,
+        data: StateData<'_, CustomGameData<'_, '_>>,
         event: StateEvent,
     ) -> Trans<CustomGameData<'a, 'b>, StateEvent> {
         if let StateEvent::Window(event) = &event {
@@ -177,7 +181,7 @@ impl<'a, 'b> State<CustomGameData<'a, 'b>, StateEvent> for Main {
 
     fn update(
         &mut self,
-        data: StateData<CustomGameData>,
+        data: StateData<'_, CustomGameData<'_, '_>>,
     ) -> Trans<CustomGameData<'a, 'b>, StateEvent> {
         data.data.update(&data.world, true);
         Trans::None
@@ -185,35 +189,38 @@ impl<'a, 'b> State<CustomGameData<'a, 'b>, StateEvent> for Main {
 }
 
 fn main() -> Result<(), Error> {
-    amethyst::start_logger(Default::default());
+    amethyst::Logger::from_config(amethyst::LoggerConfig {
+        level_filter: log::LevelFilter::Info,
+        ..Default::default()
+    })
+    .level_for("custom_game_data", log::LevelFilter::Debug)
+    .start();
 
-    let app_root = application_root_dir();
+    let app_root = application_root_dir()?;
 
     // Add our meshes directory to the asset loader.
-    let resources_directory = format!("{}/examples/assets", app_root);
+    let assets_dir = app_root.join("examples/custom_game_data/assets");
 
-    let display_config_path = format!(
-        "{}/examples/custom_game_data/resources/display_config.ron",
-        app_root
-    );
+    let display_config_path = app_root.join("examples/custom_game_data/config/display.ron");
 
-    let display_config = DisplayConfig::load(display_config_path);
-    let pipeline_builder = Pipeline::build().with_stage(
-        Stage::with_backbuffer()
-            .clear_target([0.0, 0.0, 0.0, 1.0], 1.0)
-            .with_pass(DrawShaded::<PosNormTex>::new())
-            .with_pass(DrawUi::new()),
-    );
     let game_data = CustomGameDataBuilder::default()
-        .with_base(PrefabLoaderSystem::<MyPrefabData>::default(), "", &[])
-        .with_running::<ExampleSystem>(ExampleSystem::default(), "example_system", &[])
-        .with_base_bundle(TransformBundle::new())?
-        .with_base_bundle(UiBundle::<String, String>::new())?
-        .with_base_bundle(FPSCounterBundle::default())?
-        .with_base_bundle(RenderBundle::new(pipeline_builder, Some(display_config)))?
-        .with_base_bundle(InputBundle::<String, String>::new())?;
+        .with_base(PrefabLoaderSystemDesc::<MyPrefabData>::default(), "", &[])
+        .with_running(ExampleSystem::default(), "example_system", &[])
+        .with_base_bundle(TransformBundle::new())
+        .with_base_bundle(FpsCounterBundle::default())
+        .with_base_bundle(InputBundle::<StringBindings>::new())
+        .with_base_bundle(UiBundle::<StringBindings>::new())
+        .with_base_bundle(
+            RenderingBundle::<DefaultBackend>::new()
+                .with_plugin(
+                    RenderToWindow::from_config_path(display_config_path)?
+                        .with_clear([0.0, 0.0, 0.0, 1.0]),
+                )
+                .with_plugin(RenderShaded3D::default())
+                .with_plugin(RenderUi::default()),
+        );
 
-    let mut game = Application::build(resources_directory, Loading::default())?.build(game_data)?;
+    let mut game = Application::build(assets_dir, Loading::default())?.build(game_data)?;
     game.run();
 
     Ok(())

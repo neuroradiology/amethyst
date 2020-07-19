@@ -1,52 +1,58 @@
-use serde::Deserialize;
+use crate::Format;
+use amethyst_error::{format_err, Error, ResultExt};
+use serde::{Deserialize, Serialize};
 
-use {
-    error::{Error, ResultExt},
-    Asset, SimpleFormat,
-};
-
-/// Format for loading from Ron files.
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+/// Format for loading from RON files. Mostly useful for prefabs.
+/// This type cannot be used for tagged deserialization.
+/// It is meant to be used at top-level loading, manually specified to the loader.
+/// ```rust,ignore
+/// loader.load("prefab.ron", RonFormat, ());
+/// ```
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct RonFormat;
 
-impl<T> SimpleFormat<T> for RonFormat
+impl<D> Format<D> for RonFormat
 where
-    T: Asset,
-    T::Data: for<'a> Deserialize<'a> + Send + Sync + 'static,
+    D: for<'a> Deserialize<'a> + Send + Sync + 'static,
 {
-    const NAME: &'static str = "Ron";
-    type Options = ();
+    fn name(&self) -> &'static str {
+        "Ron"
+    }
 
-    fn import(&self, bytes: Vec<u8>, _: ()) -> Result<T::Data, Error> {
+    fn import_simple(&self, bytes: Vec<u8>) -> Result<D, Error> {
         use ron::de::Deserializer;
-        let mut d =
-            Deserializer::from_bytes(&bytes).chain_err(|| "Failed deserializing Ron file")?;
-        let val = T::Data::deserialize(&mut d).chain_err(|| "Failed parsing Ron file")?;
-        d.end().chain_err(|| "Failed parsing Ron file")?;
+        let mut d = Deserializer::from_bytes(&bytes)
+            .with_context(|_| format_err!("Failed deserializing Ron file"))?;
+        let val =
+            D::deserialize(&mut d).with_context(|_| format_err!("Failed parsing Ron file"))?;
+        d.end()
+            .with_context(|_| format_err!("Failed parsing Ron file"))?;
 
         Ok(val)
     }
 }
 
-/// Format for loading from Json files.
-#[cfg(feature = "json")]
-#[derive(Default, Clone, Debug)]
+/// Format for loading from JSON files. Mostly useful for prefabs.
+/// This type can only be used as manually specified to the loader.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct JsonFormat;
 
 #[cfg(feature = "json")]
-impl<T> SimpleFormat<T> for JsonFormat
+impl<D> Format<D> for JsonFormat
 where
-    T: Asset,
-    T::Data: for<'a> Deserialize<'a> + Send + Sync + 'static,
+    D: for<'a> Deserialize<'a> + Send + Sync + 'static,
 {
-    const NAME: &'static str = "Json";
-    type Options = ();
+    fn name(&self) -> &'static str {
+        "Json"
+    }
 
-    fn import(&self, bytes: Vec<u8>, _: ()) -> Result<T::Data, Error> {
+    fn import_simple(&self, bytes: Vec<u8>) -> Result<D, Error> {
         use serde_json::de::Deserializer;
         let mut d = Deserializer::from_slice(&bytes);
-        let val = T::Data::deserialize(&mut d).chain_err(|| "Failed deserializing Json file")?;
-        d.end().chain_err(|| "Failed parsing Json file")?;
+        let val = D::deserialize(&mut d)
+            .with_context(|_| format_err!("Failed deserializing Json file"))?;
+        d.end()
+            .with_context(|_| format_err!("Failed deserializing Json file"))?;
 
         Ok(val)
     }

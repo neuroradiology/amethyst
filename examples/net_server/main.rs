@@ -1,71 +1,126 @@
-extern crate amethyst;
-#[macro_use]
-extern crate log;
+// SERVER
+use std::time::Duration;
 
 use amethyst::{
-    core::frame_limiter::FrameRateLimitStrategy,
-    ecs::{Join, System, WriteStorage},
-    network::*,
+    core::{bundle::SystemBundle, frame_limiter::FrameRateLimitStrategy, SystemDesc},
+    ecs::{DispatcherBuilder, Read, System, SystemData, World, Write},
+    network::simulation::{tcp::TcpNetworkBundle, NetworkSimulationEvent, TransportResource},
     prelude::*,
-    shrev::ReaderId,
+    shrev::{EventChannel, ReaderId},
+    utils::application_root_dir,
     Result,
 };
-use std::time::Duration;
+use log::{error, info};
+use std::net::TcpListener;
 
 fn main() -> Result<()> {
     amethyst::start_logger(Default::default());
+
+    //    // UDP
+    //    let socket = UdpSocket::bind("0.0.0.0:3457")?;
+    //    socket.set_nonblocking(true)?;
+
+    // TCP
+    let listener = TcpListener::bind("0.0.0.0:3457")?;
+    listener.set_nonblocking(true)?;
+
+    //    // Laminar
+    //    let socket = LaminarSocket::bind("0.0.0.0:3457")?;
+
+    let assets_dir = application_root_dir()?.join("examples/net_server");
+
     let game_data = GameDataBuilder::default()
-        .with_bundle(NetworkBundle::<()>::new(
-            "127.0.0.1:3456".parse().unwrap(),
-            vec![Box::new(FilterConnected::<()>::new())],
-        ))?.with(SpamReceiveSystem::new(), "rcv", &[]);
-    let mut game = Application::build("./", State1)?
+        //        // UDP
+        //        .with_bundle(UdpNetworkBundle::new(Some(socket), 2048))?
+        // TCP
+        .with_bundle(TcpNetworkBundle::new(Some(listener), 2048))?
+        //        // Laminar
+        //        .with_bundle(LaminarNetworkBundle::new(Some(socket)))?
+        .with_bundle(SpamReceiveBundle)?;
+
+    let mut game = Application::build(assets_dir, GameState)?
         .with_frame_limit(
             FrameRateLimitStrategy::SleepAndYield(Duration::from_millis(2)),
-            1,
-        ).build(game_data)?;
+            60,
+        )
+        .build(game_data)?;
     game.run();
     Ok(())
 }
 
 /// Default empty state
-pub struct State1;
-impl<'a, 'b> SimpleState<'a, 'b> for State1 {
-    fn on_start(&mut self, data: StateData<GameData>) {
-        data.world
-            .create_entity()
-            .with(NetConnection::<()>::new("127.0.0.1:3455".parse().unwrap()))
-            .build();
+pub struct GameState;
+
+impl SimpleState for GameState {}
+
+#[derive(Debug)]
+struct SpamReceiveBundle;
+
+impl<'a, 'b> SystemBundle<'a, 'b> for SpamReceiveBundle {
+    fn build(self, world: &mut World, builder: &mut DispatcherBuilder<'a, 'b>) -> Result<()> {
+        builder.add(
+            SpamReceiveSystemDesc::default().build(world),
+            "receiving_system",
+            &[],
+        );
+        Ok(())
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct SpamReceiveSystemDesc;
+
+impl<'a, 'b> SystemDesc<'a, 'b, SpamReceiveSystem> for SpamReceiveSystemDesc {
+    fn build(self, world: &mut World) -> SpamReceiveSystem {
+        // Creates the EventChannel<NetworkEvent> managed by the ECS.
+        <SpamReceiveSystem as System<'_>>::SystemData::setup(world);
+        // Fetch the change we just created and call `register_reader` to get a
+        // ReaderId<NetworkEvent>. This reader id is used to fetch new events from the network event
+        // channel.
+        let reader = world
+            .fetch_mut::<EventChannel<NetworkSimulationEvent>>()
+            .register_reader();
+        SpamReceiveSystem::new(reader)
     }
 }
 
 /// A simple system that receives a ton of network events.
 struct SpamReceiveSystem {
-    pub reader: Option<ReaderId<NetEvent<()>>>,
+    reader: ReaderId<NetworkSimulationEvent>,
 }
 
 impl SpamReceiveSystem {
-    pub fn new() -> Self {
-        SpamReceiveSystem { reader: None }
+    pub fn new(reader: ReaderId<NetworkSimulationEvent>) -> Self {
+        Self { reader }
     }
 }
 
 impl<'a> System<'a> for SpamReceiveSystem {
-    type SystemData = (WriteStorage<'a, NetConnection<()>>,);
-    fn run(&mut self, (mut connections,): Self::SystemData) {
-        let mut count = 0;
-        for (mut conn,) in (&mut connections,).join() {
-            if self.reader.is_none() {
-                self.reader = Some(conn.receive_buffer.register_reader());
-            }
-            for ev in conn.receive_buffer.read(self.reader.as_mut().unwrap()) {
-                count += 1;
-                match ev {
-                    &NetEvent::TextMessage { ref msg } => info!("{}", msg),
-                    _ => {}
+    type SystemData = (
+        Write<'a, TransportResource>,
+        Read<'a, EventChannel<NetworkSimulationEvent>>,
+    );
+
+    fn run(&mut self, (mut net, channel): Self::SystemData) {
+        for event in channel.read(&mut self.reader) {
+            match event {
+                NetworkSimulationEvent::Message(addr, payload) => {
+                    info!("{}: {:?}", addr, payload);
+                    // In a typical client/server simulation, both the client and the server will
+                    // be exchanging messages at a constant rate. Laminar makes use of this by
+                    // packaging message acks with the next sent message. Therefore, in order for
+                    // reliability to work properly, we'll send a generic "ok" response.
+                    net.send(*addr, b"ok");
                 }
+                NetworkSimulationEvent::Connect(addr) => info!("New client connection: {}", addr),
+                NetworkSimulationEvent::Disconnect(addr) => {
+                    info!("Client Disconnected: {}", addr);
+                }
+                NetworkSimulationEvent::RecvError(e) => {
+                    error!("Recv Error: {:?}", e);
+                }
+                _ => {}
             }
         }
-        info!("Received {} messages this frame", count);
     }
 }

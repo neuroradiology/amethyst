@@ -1,72 +1,74 @@
 //! Demonstrates loading custom assets using the Amethyst engine.
 // TODO: Add asset loader directory store for the meshes.
 
-extern crate amethyst;
-extern crate rayon;
-
 use amethyst::{
-    assets::{Loader, Result as AssetResult, SimpleFormat},
-    core::{
-        cgmath::{Array, Deg, Vector3},
-        Transform, TransformBundle,
-    },
-    input::InputBundle,
+    assets::{Format as AssetFormat, Handle, Loader},
+    core::{math::Vector3, Transform, TransformBundle},
+    ecs::{World, WorldExt},
+    error::Error,
+    input::{InputBundle, StringBindings},
     prelude::*,
     renderer::{
-        Camera, DrawShaded, Light, Material, MaterialDefaults, Mesh, MeshData, PointLight,
-        PosNormTex, Projection, Rgba,
+        camera::Camera,
+        light::{Light, PointLight},
+        mtl::{Material, MaterialDefaults},
+        palette::{Srgb, Srgba},
+        plugins::{RenderShaded3D, RenderSkybox, RenderToWindow},
+        rendy::{
+            mesh::{MeshBuilder, Normal, Position, TexCoord},
+            texture::palette::load_from_srgba,
+        },
+        types::{DefaultBackend, Mesh, MeshData},
+        RenderingBundle,
     },
     utils::application_root_dir,
-    Error,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Custom;
 
-impl SimpleFormat<Mesh> for Custom {
-    const NAME: &'static str = "CUSTOM";
-
-    type Options = ();
+impl AssetFormat<MeshData> for Custom {
+    fn name(&self) -> &'static str {
+        "CUSTOM"
+    }
 
     /// Reads the given bytes and produces asset data.
-    fn import(&self, bytes: Vec<u8>, _: ()) -> AssetResult<MeshData> {
+    fn import_simple(&self, bytes: Vec<u8>) -> Result<MeshData, Error> {
         let data: String = String::from_utf8(bytes)?;
+        let trimmed: Vec<&str> = data.lines().filter(|line| !line.is_empty()).collect();
 
-        let trimmed: Vec<&str> = data.lines().filter(|line| line.len() >= 1).collect();
-
-        let mut result = Vec::new();
+        let mut pos = Vec::with_capacity(trimmed.len() * 3);
+        let mut norm = Vec::with_capacity(trimmed.len() * 3);
+        let mut tex = Vec::with_capacity(trimmed.len() * 3);
 
         for line in trimmed {
             let nums: Vec<&str> = line.split_whitespace().collect();
-
-            let position = [
+            pos.push(Position([
                 nums[0].parse::<f32>().unwrap(),
                 nums[1].parse::<f32>().unwrap(),
                 nums[2].parse::<f32>().unwrap(),
-            ];
-
-            let normal = [
+            ]));
+            norm.push(Normal([
                 nums[3].parse::<f32>().unwrap(),
                 nums[4].parse::<f32>().unwrap(),
                 nums[5].parse::<f32>().unwrap(),
-            ];
-
-            result.push(PosNormTex {
-                position,
-                normal,
-                tex_coord: [0.0, 0.0],
-            });
+            ]));
+            tex.push(TexCoord([0.0, 0.0]))
         }
-        Ok(result.into())
+        Ok(MeshBuilder::new()
+            .with_vertices(pos)
+            .with_vertices(norm)
+            .with_vertices(tex)
+            .into())
     }
 }
 
 struct AssetsExample;
 
-impl<'a, 'b> SimpleState<'a, 'b> for AssetsExample {
-    fn on_start(&mut self, data: StateData<GameData>) {
+impl SimpleState for AssetsExample {
+    fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
         let StateData { world, .. } = data;
-        world.add_resource(0usize);
+        world.insert(0usize);
 
         initialise_camera(world);
         initialise_lights(world);
@@ -78,20 +80,29 @@ impl<'a, 'b> SimpleState<'a, 'b> for AssetsExample {
 
             let meshes = &world.read_resource();
             let textures = &world.read_resource();
+            let materials = &world.read_resource();
 
-            let mesh = loader.load("mesh/cuboid.custom", Custom, (), (), meshes);
-            let albedo = loader.load_from_data([0.0, 0.0, 1.0, 0.0].into(), (), textures);
-            let mat = Material {
-                albedo,
-                ..mat_defaults.0.clone()
-            };
+            let mesh: Handle<Mesh> = loader.load("mesh/cuboid.custom", Custom, (), meshes);
+            let albedo = loader.load_from_data(
+                load_from_srgba(Srgba::new(0.1, 0.5, 0.3, 1.0)).into(),
+                (),
+                textures,
+            );
+            let mat: Handle<Material> = loader.load_from_data(
+                Material {
+                    albedo,
+                    ..mat_defaults.0.clone()
+                },
+                (),
+                materials,
+            );
 
             (mesh, mat)
         };
 
         let mut trans = Transform::default();
-        trans.translation = Vector3::new(-5.0, 0.0, 0.0);
-        trans.scale = Vector3::from_value(2.);
+        trans.set_translation_xyz(-5.0, 0.0, 0.0);
+        trans.set_scale(Vector3::new(2.0, 2.0, 2.0));
         world
             .create_entity()
             .with(mesh)
@@ -104,34 +115,38 @@ impl<'a, 'b> SimpleState<'a, 'b> for AssetsExample {
 fn main() -> Result<(), Error> {
     amethyst::start_logger(Default::default());
 
-    let app_root = application_root_dir();
+    let app_root = application_root_dir()?;
 
     // Add our meshes directory to the asset loader.
-    let resources_directory = format!("{}/examples/assets", app_root);
+    let assets_dir = app_root.join("examples/asset_loading/assets");
 
-    let display_config_path = format!(
-        "{}/examples/asset_loading/resources/display_config.ron",
-        app_root
-    );
+    let display_config_path = app_root.join("examples/asset_loading/config/display.ron");
 
     let game_data = GameDataBuilder::default()
-        .with_bundle(InputBundle::<String, String>::new())?
+        .with_bundle(InputBundle::<StringBindings>::new())?
         .with_bundle(TransformBundle::new())?
-        .with_basic_renderer(display_config_path, DrawShaded::<PosNormTex>::new(), false)?;
-
-    let mut game = Application::new(resources_directory, AssetsExample, game_data)?;
+        .with_bundle(
+            RenderingBundle::<DefaultBackend>::new()
+                .with_plugin(RenderToWindow::from_config_path(display_config_path)?)
+                .with_plugin(RenderShaded3D::default())
+                .with_plugin(RenderSkybox::with_colors(
+                    Srgb::new(0.82, 0.51, 0.50),
+                    Srgb::new(0.18, 0.11, 0.85),
+                )),
+        )?;
+    let mut game = Application::new(assets_dir, AssetsExample, game_data)?;
     game.run();
     Ok(())
 }
 
 fn initialise_camera(world: &mut World) {
     let mut transform = Transform::default();
-    transform.set_position(Vector3::new(0.0, -20.0, 10.0));
-    transform.set_rotation(Deg(75.96), Deg(0.0), Deg(0.0));
+    transform.set_translation_xyz(0.0, -20.0, 10.0);
+    transform.prepend_rotation_x_axis(1.325_752_1);
 
     world
         .create_entity()
-        .with(Camera::from(Projection::perspective(1.0, Deg(60.0))))
+        .with(Camera::perspective(1.0, std::f32::consts::FRAC_PI_3, 0.1))
         .with(transform)
         .build();
 }
@@ -141,12 +156,13 @@ fn initialise_lights(world: &mut World) {
     let light: Light = PointLight {
         intensity: 100.0,
         radius: 1.0,
-        color: Rgba::white(),
+        color: Srgb::new(1.0, 1.0, 1.0),
         ..Default::default()
-    }.into();
+    }
+    .into();
 
     let mut transform = Transform::default();
-    transform.set_position(Vector3::new(5.0, -20.0, 15.0));
+    transform.set_translation_xyz(5.0, -20.0, 15.0);
 
     // Add point light.
     world.create_entity().with(light).with(transform).build();

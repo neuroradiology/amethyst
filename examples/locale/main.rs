@@ -1,10 +1,8 @@
 //! Example showing how to load a Locale file as an Asset using the Loader.
 
-extern crate amethyst;
-
 use amethyst::{
     assets::{AssetStorage, Handle, Loader, Processor, ProgressCounter},
-    ecs::{Read, ReadExpect},
+    ecs::{Read, ReadExpect, WorldExt},
     locale::*,
     prelude::*,
     utils::application_root_dir,
@@ -27,27 +25,25 @@ impl Example {
     }
 }
 
-impl<'a, 'b> SimpleState<'a, 'b> for Example {
-    fn on_start(&mut self, data: StateData<GameData>) {
-        data.world.add_resource(AssetStorage::<Locale>::new());
+impl SimpleState for Example {
+    fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
+        data.world.insert(AssetStorage::<Locale>::new());
         let mut progress_counter = ProgressCounter::default();
         self.handle_en = Some(data.world.exec(
-            |(loader, storage): (ReadExpect<Loader>, Read<AssetStorage<Locale>>)| {
+            |(loader, storage): (ReadExpect<'_, Loader>, Read<'_, AssetStorage<Locale>>)| {
                 loader.load(
                     "locale/locale_en.ftl",
                     LocaleFormat,
-                    (),
                     &mut progress_counter,
                     &storage,
                 )
             },
         ));
         self.handle_fr = Some(data.world.exec(
-            |(loader, storage): (ReadExpect<Loader>, Read<AssetStorage<Locale>>)| {
+            |(loader, storage): (ReadExpect<'_, Loader>, Read<'_, AssetStorage<Locale>>)| {
                 loader.load(
                     "locale/locale_fr.ftl",
                     LocaleFormat,
-                    (),
                     &mut progress_counter,
                     &storage,
                 )
@@ -56,14 +52,26 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
         self.progress_counter = Some(progress_counter);
     }
 
-    fn update(&mut self, data: &mut StateData<GameData>) -> SimpleTrans<'a, 'b> {
+    fn update(&mut self, data: &mut StateData<'_, GameData<'_, '_>>) -> SimpleTrans {
         // Check if the locale has been loaded.
         if self.progress_counter.as_ref().unwrap().is_complete() {
             let store = data.world.read_resource::<AssetStorage<Locale>>();
             for h in [&self.handle_en, &self.handle_fr].iter() {
                 if let Some(locale) = h.as_ref().and_then(|h| store.get(h)) {
-                    println!("{}", locale.bundle.format("hello", None).unwrap().0);
-                    println!("{}", locale.bundle.format("bye", None).unwrap().0);
+                    let bundle = &locale.bundle;
+                    let msg_hello = bundle
+                        .get_message("hello")
+                        .expect("Failed to load message for hello");
+                    let msg_bye = bundle
+                        .get_message("bye")
+                        .expect("Failed to load message for bye");
+                    let hello_value = msg_hello.value.expect("Hello message has no value");
+                    let bye_value = msg_bye.value.expect("Bye message has no value");
+
+                    let mut errors = vec![];
+                    println!("{}", bundle.format_pattern(hello_value, None, &mut errors));
+                    println!("{}", bundle.format_pattern(bye_value, None, &mut errors));
+                    assert_eq!(errors.len(), 0);
                 }
             }
             Trans::Quit
@@ -76,11 +84,11 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
 fn main() -> Result<(), Error> {
     amethyst::start_logger(Default::default());
 
-    let resources_directory = format!("{}/examples/assets", application_root_dir());
+    let assets_dir = application_root_dir()?.join("examples/locale/assets");
 
     let game_data = GameDataBuilder::default().with(Processor::<Locale>::new(), "proc", &[]);
 
-    let mut game = Application::new(resources_directory, Example::new(), game_data)?;
+    let mut game = Application::new(assets_dir, Example::new(), game_data)?;
     game.run();
     Ok(())
 }

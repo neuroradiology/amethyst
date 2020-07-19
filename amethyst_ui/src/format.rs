@@ -1,17 +1,23 @@
-use gfx_glyph::Font;
+use glyph_brush::rusttype::Font;
+use serde::{Deserialize, Serialize};
 
-use amethyst_assets::{Asset, Error, Handle, ProcessingState, ResultExt, SimpleFormat};
-use amethyst_core::specs::prelude::VecStorage;
+use amethyst_assets::{Asset, Format, Handle, ProcessableAsset, ProcessingState};
+use amethyst_core::ecs::prelude::VecStorage;
+use amethyst_error::{format_err, Error, ResultExt};
 
 /// A loaded set of fonts from a file.
 #[derive(Clone)]
+#[allow(missing_debug_implementations)]
 pub struct FontAsset(pub Font<'static>);
 
 /// A handle to font data stored with `amethyst_assets`.
 pub type FontHandle = Handle<FontAsset>;
 
 #[derive(Clone)]
+#[allow(missing_debug_implementations)]
 pub struct FontData(Font<'static>);
+
+amethyst_assets::register_format_type!(FontData);
 
 impl Asset for FontAsset {
     const NAME: &'static str = "ui::Font";
@@ -19,56 +25,29 @@ impl Asset for FontAsset {
     type HandleStorage = VecStorage<Handle<Self>>;
 }
 
-impl Into<Result<ProcessingState<FontAsset>, Error>> for FontData {
-    fn into(self) -> Result<ProcessingState<FontAsset>, Error> {
-        Ok(ProcessingState::Loaded(FontAsset(self.0)))
+impl ProcessableAsset for FontAsset {
+    fn process(data: FontData) -> Result<ProcessingState<FontAsset>, Error> {
+        Ok(ProcessingState::Loaded(FontAsset(data.0)))
     }
 }
 
-/// Identical to TtfFormat.
-///
 /// Loads font files, supports TrueType and **some** OpenType files.
 ///
 /// OpenType is a superset of TrueType, so if your OpenType file uses any features that don't
 /// exist in TrueType this will fail.  This will only load the first font contained in a file.
 /// If this is a problem for you please file an issue with Amethyst on GitHub.
-pub type OtfFormat = TtfFormat;
-
-/// Loads font files, supports TrueType and **some** OpenType files.
-///
-/// OpenType is a superset of TrueType, so if your OpenType file uses any features that don't
-/// exist in TrueType this will fail.  This will only load the first font contained in a file.
-/// If this is a problem for you please file an issue with Amethyst on GitHub.
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TtfFormat;
 
-impl SimpleFormat<FontAsset> for TtfFormat {
-    const NAME: &'static str = "TTF/OTF";
-    type Options = ();
+amethyst_assets::register_format!("TTF", TtfFormat as FontData);
+impl Format<FontData> for TtfFormat {
+    fn name(&self) -> &'static str {
+        "TTF"
+    }
 
-    fn import(&self, bytes: Vec<u8>, _: ()) -> Result<FontData, Error> {
+    fn import_simple(&self, bytes: Vec<u8>) -> Result<FontData, Error> {
         Font::from_bytes(bytes)
             .map(FontData)
-            .chain_err(|| "Font parsing error")
-    }
-}
-
-/// Wrapper format for all core supported Font formats
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum FontFormat {
-    /// TTF Format
-    Ttf,
-    /// OTF Format
-    Otf,
-}
-
-impl SimpleFormat<FontAsset> for FontFormat {
-    const NAME: &'static str = "FontFormat";
-    type Options = ();
-
-    fn import(&self, bytes: Vec<u8>, _: ()) -> Result<FontData, Error> {
-        match *self {
-            FontFormat::Ttf | FontFormat::Otf => TtfFormat.import(bytes, ()),
-        }
+            .with_context(|_| format_err!("Font parsing error"))
     }
 }

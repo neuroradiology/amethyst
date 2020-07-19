@@ -1,28 +1,29 @@
 //! The simplest Amethyst example.
 
-extern crate amethyst;
-
-use amethyst::prelude::*;
+use amethyst::{prelude::*, utils::application_root_dir};
 
 struct Example;
 
 impl EmptyState for Example {
-    fn on_start(&mut self, _: StateData<()>) {
+    fn on_start(&mut self, _: StateData<'_, ()>) {
         println!("Begin!");
     }
 
-    fn on_stop(&mut self, _: StateData<()>) {
+    fn on_stop(&mut self, _: StateData<'_, ()>) {
         println!("End!");
     }
 
-    fn update(&mut self, _: StateData<()>) -> EmptyTrans {
+    fn update(&mut self, _: StateData<'_, ()>) -> EmptyTrans {
         println!("Hello from Amethyst!");
         Trans::Quit
     }
 }
 
-fn main() {
+fn main() -> amethyst::Result<()> {
     amethyst::start_logger(Default::default());
-    let mut game = Application::new("./", Example, ()).expect("Fatal error");
+    let assets_dir = application_root_dir()?.join("examples/hello_world/assets");
+    let mut game = Application::new(assets_dir, Example, ())?;
     game.run();
+
+    Ok(())
 }

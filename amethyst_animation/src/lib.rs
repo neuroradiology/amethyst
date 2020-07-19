@@ -45,27 +45,16 @@
 //! [ex_ani]: https://github.com/amethyst/amethyst/tree/master/examples/animation
 //! [ex_gltf]: https://github.com/amethyst/amethyst/tree/master/examples/gltf
 
-#![warn(missing_docs)]
-#![cfg_attr(feature = "cargo-clippy", allow(type_complexity))] // complex project
+#![warn(
+    missing_debug_implementations,
+    missing_docs,
+    rust_2018_idioms,
+    rust_2018_compatibility
+)]
+#![warn(clippy::all)]
+#![allow(clippy::new_without_default)]
 
-extern crate amethyst_assets;
-extern crate amethyst_core;
-#[macro_use]
-extern crate amethyst_derive;
-extern crate amethyst_renderer;
-#[macro_use]
-extern crate derivative;
-extern crate fnv;
-extern crate hibitset;
-extern crate itertools;
-#[macro_use]
-extern crate log;
-extern crate minterpolate;
-#[macro_use]
-extern crate serde;
-
-#[cfg(feature = "profiler")]
-extern crate thread_profiler;
+pub use minterpolate::{InterpolationFunction, InterpolationPrimitive};
 
 pub use self::{
     bundle::{AnimationBundle, SamplingBundle, VertexSkinningBundle},
@@ -82,10 +71,9 @@ pub use self::{
         AnimationControlSystem, AnimationProcessor, SamplerInterpolationSystem, SamplerProcessor,
     },
     transform::TransformChannel,
+    ui_transform::UiTransformChannel,
     util::{get_animation_set, SamplerPrimitive},
 };
-
-pub use minterpolate::{InterpolationFunction, InterpolationPrimitive};
 
 mod bundle;
 mod material;
@@ -95,4 +83,5 @@ mod skinning;
 mod sprite;
 mod systems;
 mod transform;
+mod ui_transform;
 mod util;

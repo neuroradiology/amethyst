@@ -1,40 +1,46 @@
 //! # amethyst_locale
 //!
 //! Localisation binding a `Fluent` file to an Asset<Locale> via the use of amethyst_assets.
-#![warn(missing_docs)]
 
-extern crate amethyst_assets;
-extern crate amethyst_core;
-extern crate fluent;
+#![warn(
+    missing_debug_implementations,
+    missing_docs,
+    rust_2018_idioms,
+    rust_2018_compatibility
+)]
+#![warn(clippy::all)]
 
-use fluent::bundle::FluentBundle;
-
-use amethyst_assets::{Asset, Handle, ProcessingState, Result, SimpleFormat};
-use amethyst_core::specs::prelude::VecStorage;
+use amethyst_assets::{Asset, Format, Handle};
+use amethyst_core::ecs::prelude::VecStorage;
+use amethyst_error::Error;
+pub use fluent::{concurrent::FluentBundle, FluentResource};
+use serde::{Deserialize, Serialize};
+use unic_langid::langid;
 
 /// Loads the strings from localisation files.
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct LocaleFormat;
 
-impl SimpleFormat<Locale> for LocaleFormat {
-    const NAME: &'static str = "FTL";
+amethyst_assets::register_format_type!(Locale);
 
-    type Options = ();
+amethyst_assets::register_format!("FTL", LocaleFormat as Locale);
+impl Format<Locale> for LocaleFormat {
+    fn name(&self) -> &'static str {
+        "FTL"
+    }
 
-    fn import(&self, bytes: Vec<u8>, _: ()) -> Result<Locale> {
+    fn import_simple(&self, bytes: Vec<u8>) -> Result<Locale, Error> {
         let s = String::from_utf8(bytes)?;
 
-        let mut bundle = FluentBundle::new::<&'static str>(&[]);
-        bundle
-            .add_messages(&s)
-            .expect("Error creating fluent bundle!");
-        Ok(Locale { bundle })
-    }
-}
+        let resource = FluentResource::try_new(s).expect("Failed to parse locale data");
+        let lang_en = langid!("en");
+        let mut bundle = FluentBundle::new(&[lang_en]);
 
-impl Into<Result<ProcessingState<Locale>>> for Locale {
-    fn into(self) -> Result<ProcessingState<Locale>> {
-        Ok(ProcessingState::Loaded(self))
+        bundle
+            .add_resource(resource)
+            .expect("Failed to add resource");
+
+        Ok(Locale { bundle })
     }
 }
 
@@ -42,9 +48,10 @@ impl Into<Result<ProcessingState<Locale>>> for Locale {
 pub type LocaleHandle = Handle<Locale>;
 
 /// A loaded locale.
+#[allow(missing_debug_implementations)]
 pub struct Locale {
-    /// The message context.
-    pub bundle: FluentBundle<'static>,
+    /// The bundle stores its resources for now.
+    pub bundle: FluentBundle<FluentResource>,
 }
 
 impl Asset for Locale {

@@ -1,28 +1,37 @@
 //! Displays a 2D GLTF scene
 
-#[macro_use]
-extern crate amethyst;
-extern crate amethyst_gltf;
-#[macro_use]
-extern crate serde;
+use amethyst::{
+    animation::{
+        get_animation_set, AnimationBundle, AnimationCommand, AnimationControlSet, AnimationSet,
+        EndControl, VertexSkinningBundle,
+    },
+    assets::{
+        AssetPrefab, Completion, Handle, Prefab, PrefabData, PrefabLoader, PrefabLoaderSystemDesc,
+        ProgressCounter, RonFormat,
+    },
+    controls::{ControlTagPrefab, FlyControlBundle},
+    core::transform::{Transform, TransformBundle},
+    derive::PrefabData,
+    ecs::{Entity, ReadStorage, Write, WriteStorage},
+    input::{is_close_requested, is_key_down, StringBindings, VirtualKeyCode},
+    prelude::*,
+    renderer::{
+        camera::CameraPrefab,
+        light::LightPrefab,
+        plugins::{RenderPbr3D, RenderSkybox, RenderToWindow},
+        types::DefaultBackend,
+        RenderingBundle,
+    },
+    utils::{
+        application_root_dir,
+        auto_fov::{AutoFov, AutoFovSystem},
+        tag::{Tag, TagFinder},
+    },
+    Error,
+};
+use amethyst_gltf::{GltfSceneAsset, GltfSceneFormat, GltfSceneLoaderSystemDesc};
 
-use amethyst::animation::{
-    get_animation_set, AnimationBundle, AnimationCommand, AnimationControlSet, AnimationSet,
-    EndControl, VertexSkinningBundle,
-};
-use amethyst::assets::{
-    AssetPrefab, Completion, Handle, Prefab, PrefabData, PrefabError, PrefabLoader,
-    PrefabLoaderSystem, ProgressCounter, RonFormat,
-};
-use amethyst::controls::{ControlTagPrefab, FlyControlBundle};
-use amethyst::core::transform::{Transform, TransformBundle};
-use amethyst::ecs::prelude::{Entity, ReadStorage, Write, WriteStorage};
-use amethyst::input::{is_close_requested, is_key_down};
-use amethyst::prelude::*;
-use amethyst::renderer::*;
-use amethyst::utils::application_root_dir;
-use amethyst::utils::tag::{Tag, TagFinder};
-use amethyst_gltf::{GltfSceneAsset, GltfSceneFormat, GltfSceneLoaderSystem};
+use serde::{Deserialize, Serialize};
 
 #[derive(Default)]
 struct Example {
@@ -46,23 +55,23 @@ struct ScenePrefabData {
     transform: Option<Transform>,
     gltf: Option<AssetPrefab<GltfSceneAsset, GltfSceneFormat>>,
     camera: Option<CameraPrefab>,
+    auto_fov: Option<AutoFov>,
     light: Option<LightPrefab>,
     tag: Option<Tag<AnimationMarker>>,
     fly_tag: Option<ControlTagPrefab>,
 }
 
-impl<'a, 'b> SimpleState<'a, 'b> for Example {
-    fn on_start(&mut self, data: StateData<GameData>) {
+impl SimpleState for Example {
+    fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
         let StateData { world, .. } = data;
 
         self.progress = Some(ProgressCounter::default());
 
         world.exec(
-            |(loader, mut scene): (PrefabLoader<ScenePrefabData>, Write<Scene>)| {
+            |(loader, mut scene): (PrefabLoader<'_, ScenePrefabData>, Write<'_, Scene>)| {
                 scene.handle = Some(loader.load(
                     "prefab/puffy_scene.ron",
                     RonFormat,
-                    (),
                     self.progress.as_mut().unwrap(),
                 ));
             },
@@ -71,9 +80,9 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
 
     fn handle_event(
         &mut self,
-        data: StateData<GameData>,
+        data: StateData<'_, GameData<'_, '_>>,
         event: StateEvent,
-    ) -> SimpleTrans<'a, 'b> {
+    ) -> SimpleTrans {
         let StateData { world, .. } = data;
         if let StateEvent::Window(event) = &event {
             if is_close_requested(&event) || is_key_down(&event, VirtualKeyCode::Escape) {
@@ -94,7 +103,7 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
         }
     }
 
-    fn update(&mut self, data: &mut StateData<GameData>) -> SimpleTrans<'a, 'b> {
+    fn update(&mut self, data: &mut StateData<'_, GameData<'_, '_>>) -> SimpleTrans {
         if !self.initialised {
             let remove = match self.progress.as_ref().map(|p| p.complete()) {
                 None | Some(Completion::Loading) => false,
@@ -124,7 +133,7 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
             if self.entity.is_none() {
                 if let Some(entity) = data
                     .world
-                    .exec(|finder: TagFinder<AnimationMarker>| finder.find())
+                    .exec(|finder: TagFinder<'_, AnimationMarker>| finder.find())
                 {
                     self.entity = Some(entity);
                     self.initialised = true;
@@ -138,13 +147,13 @@ impl<'a, 'b> SimpleState<'a, 'b> for Example {
 fn toggle_or_cycle_animation(
     entity: Option<Entity>,
     scene: &mut Scene,
-    sets: &ReadStorage<AnimationSet<usize, Transform>>,
-    controls: &mut WriteStorage<AnimationControlSet<usize, Transform>>,
+    sets: &ReadStorage<'_, AnimationSet<usize, Transform>>,
+    controls: &mut WriteStorage<'_, AnimationControlSet<usize, Transform>>,
 ) {
     if let Some((entity, Some(animations))) = entity.map(|entity| (entity, sets.get(entity))) {
         if animations.animations.len() > scene.animation_index {
             let animation = animations.animations.get(&scene.animation_index).unwrap();
-            let mut set = get_animation_set::<usize, Transform>(controls, entity).unwrap();
+            let set = get_animation_set::<usize, Transform>(controls, entity).unwrap();
             if set.has_animation(scene.animation_index) {
                 set.toggle(scene.animation_index);
             } else {
@@ -168,45 +177,55 @@ fn toggle_or_cycle_animation(
 fn main() -> Result<(), amethyst::Error> {
     amethyst::start_logger(Default::default());
 
-    let app_root = application_root_dir();
+    let app_root = application_root_dir()?;
 
-    let path = format!("{}/examples/gltf/resources/display_config.ron", app_root);
-
-    let resources_directory = format!("{}/examples/assets/", app_root);
+    let display_config_path = app_root.join("examples/gltf/config/display.ron");
+    let assets_dir = app_root.join("examples/gltf/assets/");
 
     let game_data = GameDataBuilder::default()
-        .with(
-            PrefabLoaderSystem::<ScenePrefabData>::default(),
+        .with(AutoFovSystem::default(), "auto_fov", &[])
+        .with_system_desc(
+            PrefabLoaderSystemDesc::<ScenePrefabData>::default(),
             "scene_loader",
             &[],
-        ).with(
-            GltfSceneLoaderSystem::default(),
+        )
+        .with_system_desc(
+            GltfSceneLoaderSystemDesc::default(),
             "gltf_loader",
             &["scene_loader"], // This is important so that entity instantiation is performed in a single frame.
-        ).with_basic_renderer(
-            path,
-            DrawPbmSeparate::new()
-                .with_vertex_skinning()
-                .with_transparency(ColorMask::all(), ALPHA, Some(DepthMode::LessEqualWrite)),
-            false,
-        )?.with_bundle(
+        )
+        .with_bundle(
             AnimationBundle::<usize, Transform>::new("animation_control", "sampler_interpolation")
                 .with_dep(&["gltf_loader"]),
-        )?.with_bundle(
-            FlyControlBundle::<String, String>::new(None, None, None)
+        )?
+        .with_bundle(
+            FlyControlBundle::<StringBindings>::new(None, None, None)
                 .with_sensitivity(0.1, 0.1)
                 .with_speed(5.),
-        )?.with_bundle(TransformBundle::new().with_dep(&[
+        )?
+        .with_bundle(TransformBundle::new().with_dep(&[
             "animation_control",
             "sampler_interpolation",
             "fly_movement",
-        ]))?.with_bundle(VertexSkinningBundle::new().with_dep(&[
+        ]))?
+        .with_bundle(VertexSkinningBundle::new().with_dep(&[
             "transform_system",
             "animation_control",
             "sampler_interpolation",
-        ]))?;
+        ]))?
+        // `VisibilitySortingSystem` (part of `RenderPbr3D`) should depend on:
+        // &["fly_movement", "transform_system", "auto_fov"]
+        //
+        // There is currently no way to pass the dependencies to that system. However, since that
+        // system is thread local as part of rendering, it runs after all of the systems anyway.
+        .with_bundle(
+            RenderingBundle::<DefaultBackend>::new()
+                .with_plugin(RenderToWindow::from_config_path(display_config_path)?)
+                .with_plugin(RenderPbr3D::default().with_skinning())
+                .with_plugin(RenderSkybox::default()),
+        )?;
 
-    let mut game = Application::build(resources_directory, Example::default())?.build(game_data)?;
+    let mut game = Application::build(assets_dir, Example::default())?.build(game_data)?;
     game.run();
     Ok(())
 }

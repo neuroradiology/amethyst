@@ -1,9 +1,10 @@
 use amethyst_core::{
-    specs::{Entity, WriteStorage},
-    GlobalTransform, Named, Transform,
+    ecs::{Entity, WriteStorage},
+    Named, Transform,
 };
+use amethyst_error::Error;
 
-use {PrefabData, PrefabError, ProgressCounter};
+use crate::{PrefabData, ProgressCounter};
 
 impl<'a, T> PrefabData<'a> for Option<T>
 where
@@ -17,9 +18,15 @@ where
         entity: Entity,
         system_data: &mut Self::SystemData,
         entities: &[Entity],
-    ) -> Result<Self::Result, PrefabError> {
+        children: &[Entity],
+    ) -> Result<Self::Result, Error> {
         if let Some(ref prefab) = self {
-            Ok(Some(prefab.add_to_entity(entity, system_data, entities)?))
+            Ok(Some(prefab.add_to_entity(
+                entity,
+                system_data,
+                entities,
+                children,
+            )?))
         } else {
             Ok(None)
         }
@@ -29,7 +36,7 @@ where
         &mut self,
         progress: &mut ProgressCounter,
         system_data: &mut Self::SystemData,
-    ) -> Result<bool, PrefabError> {
+    ) -> Result<bool, Error> {
         if let Some(ref mut prefab) = self {
             prefab.load_sub_assets(progress, system_data)
         } else {
@@ -38,25 +45,8 @@ where
     }
 }
 
-impl<'a> PrefabData<'a> for GlobalTransform {
-    type SystemData = WriteStorage<'a, Self>;
-    type Result = ();
-
-    fn add_to_entity(
-        &self,
-        entity: Entity,
-        storage: &mut Self::SystemData,
-        _: &[Entity],
-    ) -> Result<(), PrefabError> {
-        storage.insert(entity, self.clone()).map(|_| ())
-    }
-}
-
 impl<'a> PrefabData<'a> for Transform {
-    type SystemData = (
-        WriteStorage<'a, Transform>,
-        WriteStorage<'a, GlobalTransform>,
-    );
+    type SystemData = WriteStorage<'a, Transform>;
     type Result = ();
 
     fn add_to_entity(
@@ -64,9 +54,10 @@ impl<'a> PrefabData<'a> for Transform {
         entity: Entity,
         storages: &mut Self::SystemData,
         _: &[Entity],
-    ) -> Result<(), PrefabError> {
-        storages.1.insert(entity, GlobalTransform::default())?;
-        storages.0.insert(entity, self.clone()).map(|_| ())
+        _: &[Entity],
+    ) -> Result<(), Error> {
+        storages.insert(entity, self.clone()).map(|_| ())?;
+        Ok(())
     }
 }
 
@@ -79,13 +70,16 @@ impl<'a> PrefabData<'a> for Named {
         entity: Entity,
         storages: &mut Self::SystemData,
         _: &[Entity],
-    ) -> Result<(), PrefabError> {
-        storages.0.insert(entity, self.clone()).map(|_| ())
+        _: &[Entity],
+    ) -> Result<(), Error> {
+        storages.0.insert(entity, self.clone()).map(|_| ())?;
+        Ok(())
     }
 }
 
 macro_rules! impl_data {
     ( $($ty:ident:$i:tt),* ) => {
+        #[allow(unused)]
         impl<'a, $($ty),*> PrefabData<'a> for ( $( $ty , )* )
             where $( $ty : PrefabData<'a> ),*
         {
@@ -101,10 +95,11 @@ macro_rules! impl_data {
                 entity: Entity,
                 system_data: &mut Self::SystemData,
                 entities: &[Entity],
-            ) -> Result<(), PrefabError> {
+                children: &[Entity],
+            ) -> Result<(), Error> {
                 #![allow(unused_variables)]
                 $(
-                    self.$i.add_to_entity(entity, &mut system_data.$i, entities)?;
+                    self.$i.add_to_entity(entity, &mut system_data.$i, entities, children)?;
                 )*
                 Ok(())
             }
@@ -113,12 +108,10 @@ macro_rules! impl_data {
                 &mut self, progress:
                 &mut ProgressCounter,
                 system_data: &mut Self::SystemData
-            ) -> Result<bool, PrefabError> {
+            ) -> Result<bool, Error> {
                 let mut ret = false;
                 $(
-                    if self.$i.load_sub_assets(progress, &mut system_data.$i)? {
-                        ret = true;
-                    }
+                    ret |= self.$i.load_sub_assets(progress, &mut system_data.$i)?;
                 )*
                 Ok(ret)
             }
@@ -126,6 +119,7 @@ macro_rules! impl_data {
     };
 }
 
+impl_data!();
 impl_data!(A:0);
 impl_data!(A:0, B:1);
 impl_data!(A:0, B:1, C:2);

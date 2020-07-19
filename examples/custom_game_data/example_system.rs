@@ -1,17 +1,21 @@
 use super::DemoState;
 use amethyst::{
     core::{
-        cgmath::{Quaternion, Rad, Rotation, Rotation3},
+        math::{UnitQuaternion, Vector3},
         Time, Transform,
     },
-    ecs::prelude::{Entity, Join, Read, ReadStorage, System, WriteExpect, WriteStorage},
-    renderer::{Camera, Light},
+    derive::SystemDesc,
+    ecs::prelude::{
+        Entity, Join, Read, ReadStorage, System, SystemData, WriteExpect, WriteStorage,
+    },
+    renderer::{camera::Camera, light::Light},
     ui::{UiFinder, UiText},
-    utils::fps_counter::FPSCounter,
+    utils::fps_counter::FpsCounter,
 };
 
-#[derive(Default)]
+#[derive(Default, SystemDesc)]
 pub struct ExampleSystem {
+    #[system_desc(skip)]
     fps_display: Option<Entity>,
 }
 
@@ -23,7 +27,7 @@ impl<'a> System<'a> for ExampleSystem {
         WriteStorage<'a, Transform>,
         WriteExpect<'a, DemoState>,
         WriteStorage<'a, UiText>,
-        Read<'a, FPSCounter>,
+        Read<'a, FpsCounter>,
         UiFinder<'a>,
     );
 
@@ -32,21 +36,20 @@ impl<'a> System<'a> for ExampleSystem {
             data;
         let light_angular_velocity = -1.0;
         let light_orbit_radius = 15.0;
-        let light_z = 6.0;
+        let light_y = 6.0;
 
         let camera_angular_velocity = 0.1;
 
         state.light_angle += light_angular_velocity * time.delta_seconds();
         state.camera_angle += camera_angular_velocity * time.delta_seconds();
 
-        let delta_rot =
-            Quaternion::from_angle_z(Rad(camera_angular_velocity * time.delta_seconds()));
+        let delta_rot: UnitQuaternion<f32> = UnitQuaternion::from_axis_angle(
+            &Vector3::y_axis(),
+            camera_angular_velocity * time.delta_seconds(),
+        );
         for (_, transform) in (&camera, &mut transforms).join() {
-            // rotate the camera, using the origin as a pivot point
-            transform.translation = delta_rot.rotate_vector(transform.translation);
-            // add the delta rotation for the frame to the total rotation (quaternion multiplication
-            // is the same as rotational addition)
-            transform.rotation = (delta_rot * Quaternion::from(transform.rotation)).into();
+            // Append the delta rotation to the current transform.
+            *transform.isometry_mut() = delta_rot * transform.isometry();
         }
 
         for (point_light, transform) in
@@ -58,15 +61,18 @@ impl<'a> System<'a> for ExampleSystem {
                     } else {
                         None
                     }
-                }) {
-            transform.translation.x = light_orbit_radius * state.light_angle.cos();
-            transform.translation.y = light_orbit_radius * state.light_angle.sin();
-            transform.translation.z = light_z;
+                })
+        {
+            transform.set_translation_xyz(
+                light_orbit_radius * state.light_angle.cos(),
+                light_y,
+                light_orbit_radius * state.light_angle.sin(),
+            );
 
-            point_light.color = state.light_color.into();
+            point_light.color = state.light_color;
         }
 
-        if let None = self.fps_display {
+        if self.fps_display.is_none() {
             if let Some(fps_entity) = finder.find("fps_text") {
                 self.fps_display = Some(fps_entity);
             }

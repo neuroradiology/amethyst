@@ -1,11 +1,17 @@
-use hibitset::BitSet;
+use derivative::Derivative;
+use serde::{Deserialize, Serialize};
 
-use amethyst_assets::{PrefabData, PrefabError, ProgressCounter};
+use amethyst_assets::{PrefabData, ProgressCounter};
 use amethyst_core::{
-    cgmath::{Matrix4, SquareMatrix},
-    specs::prelude::{Component, DenseVecStorage, Entity, WriteStorage},
+    ecs::{
+        hibitset::BitSet,
+        prelude::{Component, DenseVecStorage, Entity, WriteStorage},
+    },
+    math::Matrix4,
 };
-use amethyst_renderer::JointTransformsPrefab;
+use amethyst_derive::PrefabData;
+use amethyst_error::Error;
+use amethyst_rendy::skinning::JointTransformsPrefab;
 
 /// Joint, attach to an entity with a `Transform`
 #[derive(Debug, Clone)]
@@ -71,14 +77,18 @@ impl<'a> PrefabData<'a> for JointPrefab {
         entity: Entity,
         storage: &mut Self::SystemData,
         entities: &[Entity],
-    ) -> Result<(), PrefabError> {
+        _: &[Entity],
+    ) -> Result<(), Error> {
         storage
             .insert(
                 entity,
                 Joint {
                     skins: self.skins.iter().map(|i| entities[*i]).collect(),
                 },
-            ).map(|_| ())
+            )
+            .map(|_| ())?;
+
+        Ok(())
     }
 }
 
@@ -104,7 +114,8 @@ impl<'a> PrefabData<'a> for SkinPrefab {
         entity: Entity,
         storage: &mut Self::SystemData,
         entities: &[Entity],
-    ) -> Result<(), PrefabError> {
+        _: &[Entity],
+    ) -> Result<(), Error> {
         storage
             .insert(
                 entity,
@@ -119,12 +130,15 @@ impl<'a> PrefabData<'a> for SkinPrefab {
                     inverse_bind_matrices: self.inverse_bind_matrices.clone(),
                     joint_matrices: Vec::with_capacity(self.joints.len()),
                 },
-            ).map(|_| ())
+            )
+            .map(|_| ())?;
+
+        Ok(())
     }
 }
 
 /// `PrefabData` for full skinning support
-#[derive(Clone, Default, Debug, Serialize, Deserialize, PrefabData)]
+#[derive(Clone, Debug, Default, Derivative, Serialize, Deserialize, PrefabData)]
 #[serde(default)]
 pub struct SkinnablePrefab {
     /// Place `Skin` on the `Entity`

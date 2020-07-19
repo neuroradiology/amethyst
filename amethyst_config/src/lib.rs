@@ -1,17 +1,14 @@
 //! Loads RON files into a structure for easy / statically typed usage.
-//!
 
 #![crate_name = "amethyst_config"]
-#![doc(html_logo_url = "https://www.amethyst.rs/assets/amethyst.svg")]
-#![warn(missing_docs)]
-
-#[macro_use]
-extern crate log;
-extern crate ron;
-extern crate serde;
-
-#[cfg(feature = "profiler")]
-extern crate thread_profiler;
+#![warn(
+    missing_debug_implementations,
+    missing_docs,
+    rust_2018_idioms,
+    rust_2018_compatibility
+)]
+#![warn(clippy::all)]
+#![allow(clippy::new_without_default)]
 
 use std::{
     error::Error,
@@ -19,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ron::{de::Error as DeError, ser::Error as SerError};
+use ron::{self, de::Error as DeError, ser::Error as SerError};
 use serde::{Deserialize, Serialize};
 
 /// Error related to anything that manages/creates configurations as well as
@@ -37,7 +34,7 @@ pub enum ConfigError {
 }
 
 impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             ConfigError::File(ref err) => write!(f, "{}", err),
             ConfigError::Parser(ref msg) => write!(f, "{}", msg),
@@ -87,7 +84,7 @@ impl Error for ConfigError {
         }
     }
 
-    fn cause(&self) -> Option<&Error> {
+    fn cause(&self) -> Option<&dyn Error> {
         match *self {
             ConfigError::File(ref err) => Some(err),
             _ => None,
@@ -101,11 +98,13 @@ where
     Self: Sized,
 {
     /// Loads a configuration structure from a file.
-    /// Defaults if the file fails in any way.
-    fn load<P: AsRef<Path>>(path: P) -> Self;
+    fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError>;
 
     /// Loads a configuration structure from a file.
-    fn load_no_fallback<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError>;
+    #[deprecated(note = "use `load` instead")]
+    fn load_no_fallback<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        Self::load(path)
+    }
 
     /// Loads configuration structure from raw bytes.
     fn load_bytes(bytes: &[u8]) -> Result<Self, ConfigError>;
@@ -116,23 +115,10 @@ where
 
 impl<T> Config for T
 where
-    T: for<'a> Deserialize<'a> + Serialize + Default,
+    T: for<'a> Deserialize<'a> + Serialize,
 {
-    fn load<P: AsRef<Path>>(path: P) -> Self {
-        Self::load_no_fallback(path.as_ref()).unwrap_or_else(|e| {
-            if let Some(path) = path.as_ref().to_str() {
-                error!("Failed to load config file '{}': {}", path, e);
-            } else {
-                error!("Failed to load config: {}", e);
-            }
-
-            Self::default()
-        })
-    }
-
-    fn load_no_fallback<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        use std::fs::File;
-        use std::io::Read;
+    fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        use std::{fs::File, io::Read};
 
         let path = path.as_ref();
 
@@ -144,7 +130,7 @@ where
             buffer
         };
 
-        if path.extension().and_then(|e| e.to_str()) == Some("ron") {
+        if path.extension().and_then(std::ffi::OsStr::to_str) == Some("ron") {
             Self::load_bytes(&content)
         } else {
             Err(ConfigError::Extension(path.to_path_buf()))
@@ -161,8 +147,7 @@ where
 
     fn write<P: AsRef<Path>>(&self, path: P) -> Result<(), ConfigError> {
         use ron::ser::to_string_pretty;
-        use std::fs::File;
-        use std::io::Write;
+        use std::{fs::File, io::Write};
 
         let s = to_string_pretty(self, Default::default())?;
         File::create(path)?.write_all(s.as_bytes())?;

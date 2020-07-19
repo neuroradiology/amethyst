@@ -1,5 +1,7 @@
-use std::{fmt, hash::Hash, marker::PhantomData, path::PathBuf};
+use std::{fmt, marker::PhantomData, path::PathBuf};
 
+use derivative::Derivative;
+use derive_new::new;
 use sdl2::{
     self,
     controller::{AddMappingError, Axis, Button, GameController},
@@ -8,13 +10,14 @@ use sdl2::{
 };
 
 use amethyst_core::{
+    ecs::prelude::{System, SystemData, World, Write},
     shrev::EventChannel,
-    specs::prelude::{Resources, RunNow, SystemData, Write},
+    SystemDesc,
 };
 
 use super::{
     controller::{ControllerAxis, ControllerButton, ControllerEvent},
-    InputEvent, InputHandler,
+    BindingTypes, InputEvent, InputHandler,
 };
 
 /// A collection of errors that can occur in the SDL system.
@@ -29,7 +32,7 @@ pub enum SdlSystemError {
 }
 
 impl fmt::Display for SdlSystemError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             SdlSystemError::ContextInit(ref msg) => write!(f, "Failed to initialize SDL: {}", msg),
             SdlSystemError::ControllerSubsystemInit(ref msg) => {
@@ -43,6 +46,7 @@ impl fmt::Display for SdlSystemError {
 }
 
 /// Different ways to pass in a controller mapping for an SDL controller.
+#[derive(Debug)]
 pub enum ControllerMappings {
     /// Provide mappings from a file
     FromPath(PathBuf),
@@ -50,91 +54,109 @@ pub enum ControllerMappings {
     FromString(String),
 }
 
-/// A system that pumps SDL events into the `amethyst_input` APIs.
-pub struct SdlEventsSystem<AX, AC>
+/// Builds a `SdlEventsSystem`.
+#[derive(Derivative, Debug, new)]
+#[derivative(Default(bound = ""))]
+pub struct SdlEventsSystemDesc<T>
 where
-    AX: Hash + Eq,
-    AC: Hash + Eq,
+    T: BindingTypes,
 {
+    mappings: Option<ControllerMappings>,
+    marker: PhantomData<T>,
+}
+
+impl<'a, 'b, T> SystemDesc<'a, 'b, SdlEventsSystem<T>> for SdlEventsSystemDesc<T>
+where
+    T: BindingTypes,
+{
+    fn build(self, world: &mut World) -> SdlEventsSystem<T> {
+        <SdlEventsSystem<T> as System<'_>>::SystemData::setup(world);
+
+        SdlEventsSystem::new(world, self.mappings)
+            .unwrap_or_else(|e| panic!("Failed to build SdlEventsSystem. Error: {}", e))
+    }
+}
+
+/// A system that pumps SDL events into the `amethyst_input` APIs.
+#[allow(missing_debug_implementations)]
+pub struct SdlEventsSystem<T: BindingTypes> {
     #[allow(dead_code)]
     sdl_context: Sdl,
     event_pump: Option<EventPump>,
     controller_subsystem: GameControllerSubsystem,
     /// Vector of opened controllers and their corresponding joystick indices
     opened_controllers: Vec<(u32, GameController)>,
-    marker: PhantomData<(AX, AC)>,
+    marker: PhantomData<T>,
 }
 
-type SdlEventsData<'a, AX, AC> = (
-    Write<'a, InputHandler<AX, AC>>,
-    Write<'a, EventChannel<InputEvent<AC>>>,
+type SdlEventsData<'a, T> = (
+    Write<'a, InputHandler<T>>,
+    Write<'a, EventChannel<InputEvent<T>>>,
 );
 
-impl<'a, AX, AC> RunNow<'a> for SdlEventsSystem<AX, AC>
-where
-    AX: Hash + Eq + Clone + Send + Sync + 'static,
-    AC: Hash + Eq + Clone + Send + Sync + 'static,
-{
-    fn run_now(&mut self, res: &'a Resources) {
-        let (mut handler, mut output) = SdlEventsData::fetch(res);
+impl<'a, T: BindingTypes> System<'a> for SdlEventsSystem<T> {
+    type SystemData = SdlEventsData<'a, T>;
 
-        let mut event_pump = self.event_pump.take().unwrap();
+    fn run(&mut self, (mut handler, mut output): Self::SystemData) {
+        let mut event_pump = self
+            .event_pump
+            .take()
+            .expect("Unreachable: `event_pump` is always reinserted after `take`");
         for event in event_pump.poll_iter() {
             // handle appropriate events locally
             self.handle_sdl_event(&event, &mut handler, &mut output);
         }
         self.event_pump = Some(event_pump);
     }
-
-    fn setup(&mut self, res: &mut Resources) {
-        let (mut handler, mut output) = SdlEventsData::fetch(res);
-        self.initialize_controllers(&mut handler, &mut output);
-    }
 }
 
-impl<AX, AC> SdlEventsSystem<AX, AC>
-where
-    AX: Hash + Eq + Clone + Send + Sync + 'static,
-    AC: Hash + Eq + Clone + Send + Sync + 'static,
-{
+impl<T: BindingTypes> SdlEventsSystem<T> {
     /// Creates a new instance of this system with the provided controller mappings.
-    pub fn new(mappings: Option<ControllerMappings>) -> Result<Self, SdlSystemError> {
-        let sdl_context = sdl2::init().map_err(|e| SdlSystemError::ContextInit(e))?;
+    pub fn new(
+        world: &mut World,
+        mappings: Option<ControllerMappings>,
+    ) -> Result<Self, SdlSystemError> {
+        let sdl_context = sdl2::init().map_err(SdlSystemError::ContextInit)?;
+
         let event_pump = sdl_context
             .event_pump()
-            .map_err(|e| SdlSystemError::ContextInit(e))?;
+            .map_err(SdlSystemError::ContextInit)?;
         let controller_subsystem = sdl_context
             .game_controller()
-            .map_err(|e| SdlSystemError::ControllerSubsystemInit(e))?;
+            .map_err(SdlSystemError::ControllerSubsystemInit)?;
 
         match mappings {
             Some(ControllerMappings::FromPath(p)) => {
                 controller_subsystem
                     .load_mappings(p)
-                    .map_err(|e| SdlSystemError::AddMappingError(e))?;
+                    .map_err(SdlSystemError::AddMappingError)?;
             }
             Some(ControllerMappings::FromString(s)) => {
                 controller_subsystem
                     .add_mapping(s.as_str())
-                    .map_err(|e| SdlSystemError::AddMappingError(e))?;
+                    .map_err(SdlSystemError::AddMappingError)?;
             }
             None => {}
         };
 
-        Ok(SdlEventsSystem {
+        SdlEventsData::<T>::setup(world);
+        let mut sys = SdlEventsSystem {
             sdl_context,
             event_pump: Some(event_pump),
             controller_subsystem,
             opened_controllers: vec![],
             marker: PhantomData,
-        })
+        };
+        let (mut handler, mut output) = SdlEventsData::fetch(world);
+        sys.initialize_controllers(&mut handler, &mut output);
+        Ok(sys)
     }
 
     fn handle_sdl_event(
         &mut self,
         event: &Event,
-        handler: &mut InputHandler<AX, AC>,
-        output: &mut EventChannel<InputEvent<AC>>,
+        handler: &mut InputHandler<T>,
+        output: &mut EventChannel<InputEvent<T>>,
     ) {
         use self::ControllerEvent::*;
 
@@ -147,9 +169,9 @@ where
                         which: which as u32,
                         axis: axis.into(),
                         value: if value > 0 {
-                            (value as f64) / 32767f64
+                            f32::from(value) / 32767.0
                         } else {
-                            (value as f64) / 32768f64
+                            f32::from(value) / 32768.0
                         },
                     },
                     output,
@@ -183,9 +205,9 @@ where
                 );
             }
             Event::ControllerDeviceAdded { which, .. } => {
-                self.open_controller(which).map(|idx| {
+                if let Some(idx) = self.open_controller(which) {
                     handler.send_controller_event(&ControllerConnected { which: idx }, output);
-                });
+                }
             }
             _ => {}
         }
@@ -215,16 +237,16 @@ where
 
     fn initialize_controllers(
         &mut self,
-        handler: &mut InputHandler<AX, AC>,
-        output: &mut EventChannel<InputEvent<AC>>,
+        handler: &mut InputHandler<T>,
+        output: &mut EventChannel<InputEvent<T>>,
     ) {
-        use controller::ControllerEvent::ControllerConnected;
+        use crate::controller::ControllerEvent::ControllerConnected;
 
         if let Ok(available) = self.controller_subsystem.num_joysticks() {
             for id in 0..available {
-                self.open_controller(id).map(|idx| {
+                if let Some(idx) = self.open_controller(id) {
                     handler.send_controller_event(&ControllerConnected { which: idx }, output);
-                });
+                }
             }
         }
     }
